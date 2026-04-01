@@ -88,8 +88,7 @@ services:
     command: >
       sh -c "
       python -m nltk.downloader punkt stopwords vader_lexicon &&
-      alembic upgrade head &&
-      uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+      uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
       "
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -247,7 +246,7 @@ volumes:
 # 
 # EXPOSE 8000
 # 
-# CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 # ============================================
 # Dockerfile for Frontend

@@ -1,407 +1,183 @@
-# 🚀 Amazon Review Intelligence Dashboard
+# Amazon Review Intelligence Dashboard
 
-> AI-Powered Amazon Product Review Analysis with Real-time Insights
+AI-powered Amazon review analysis with caching, session auth, and exportable insights.
 
-[![Python](https://img.shields.io/badge/Python-3.11-blue.svg)](https://python.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.109-green.svg)](https://fastapi.tiangolo.com)
-[![Next.js](https://img.shields.io/badge/Next.js-14-black.svg)](https://nextjs.org)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+## Overview
+Amazon Review Intelligence analyzes Amazon product reviews by ASIN (or URL parsed on frontend), then returns:
+- sentiment and rating distributions
+- keywords/themes/emotions
+- AI-generated summaries/insights (when enabled)
+- export files (CSV/XLSX path and PDF)
 
-## 📋 Table of Contents
+Current active runtime:
+- Backend: `backend/main.py` (`uvicorn main:app`)
+- Frontend: `frontend/app/page.tsx` (`Dashboard`)
 
-- [Overview](#overview)
-- [Features](#features)
-- [Tech Stack](#tech-stack)
-- [Architecture](#architecture)
-- [Getting Started](#getting-started)
-- [Deployment](#deployment)
-- [API Documentation](#api-documentation)
-- [Contributing](#contributing)
-- [License](#license)
+## Implemented Core Features
+- Apify review fetch with mock fallback
+- NLP pipeline (VADER + TextBlob + rule-based enrichment)
+- Redis response caching for analyze endpoint
+- Session-cookie authentication (signup/login/logout/me)
+- Protected expensive endpoints (analyze + export)
+- PostgreSQL/SQLite-ready schema with Alembic migrations
+- Subscription-ready placeholder schema (Razorpay mapping fields)
 
-## 🎯 Overview
-
-**Amazon Review Intelligence** is an AI-powered analytics platform that transforms Amazon product reviews into actionable insights. Built with modern technologies, it provides sentiment analysis, keyword extraction, emotion detection, and comprehensive visualizations.
-
-### Key Capabilities
-
-- 🤖 **AI-Powered Analysis**: Advanced NLP using transformers and sentiment models
-- 📊 **Interactive Dashboards**: Real-time visualizations with Chart.js and D3.js
-- 🌍 **Multi-Country Support**: Fetch reviews from Amazon marketplaces worldwide
-- 📈 **Trend Detection**: Identify patterns and emerging issues
-- 💬 **Emotion Analysis**: Detect joy, anger, surprise, and more
-- 📄 **Report Generation**: Export professional PDF/Excel reports
-
-## ✨ Features
-
-### Backend (FastAPI)
-- ✅ RESTful API with automatic OpenAPI documentation
-- ✅ Apify integration for review scraping
-- ✅ Multi-model NLP pipeline (VADER, TextBlob, Transformers)
-- ✅ Sentiment scoring with confidence intervals
-- ✅ Keyword clustering and topic modeling
-- ✅ Emotion detection (8 categories)
-- ✅ Automated report generation (PDF/Excel)
-- ✅ Rate limiting and error handling
-- ✅ CORS support for cross-origin requests
-
-### Frontend (Next.js)
-- ✅ Modern, responsive UI with Tailwind CSS
-- ✅ Real-time data visualization
-- ✅ Interactive charts and graphs
-- ✅ Product search with ASIN/URL support
-- ✅ Multi-tab analytics view
-- ✅ Export functionality
-- ✅ Loading states and error boundaries
-- ✅ Dark mode support
-
-## 🛠️ Tech Stack
-
+## Tech Stack
 ### Backend
-```
-- Framework: FastAPI 0.109+
-- Language: Python 3.11+
-- NLP: Transformers, NLTK, spaCy
-- Scraping: Apify API
-- Database: PostgreSQL (optional)
-- Caching: Redis (optional)
-```
+- FastAPI
+- SQLAlchemy + Alembic
+- Redis (optional, env-controlled)
+- passlib + bcrypt (session auth)
+- pandas/numpy/nltk/textblob/vader
+- Apify client
 
 ### Frontend
-```
-- Framework: Next.js 14
-- Language: TypeScript
-- UI: Shadcn UI + Tailwind CSS
-- Charts: Recharts, D3.js
-- State: React Hooks
-- HTTP: Axios
-```
+- Next.js 14 + TypeScript
+- Axios
+- Recharts + D3
+- Tailwind + UI primitives
 
-### DevOps
-```
-- CI/CD: GitHub Actions
-- Backend: Render
-- Frontend: Vercel
-- Monitoring: Sentry (optional)
-```
-
-## 🏗️ Architecture
-
-```
-┌─────────────────┐
-│   Frontend      │
-│   (Next.js)     │
-│   Port: 3000    │
-└────────┬────────┘
-         │
-         │ HTTP/REST
-         │
-┌────────▼────────┐      ┌──────────────┐
-│   Backend       │◄────►│  Apify API   │
-│   (FastAPI)     │      │  (Scraping)  │
-│   Port: 8000    │      └──────────────┘
-└────────┬────────┘
-         │
-         │
-┌────────▼────────┐      ┌──────────────┐
-│  NLP Pipeline   │◄────►│  AI Models   │
-│  - Sentiment    │      │  - OpenAI    │
-│  - Keywords     │      │  - HuggingFace│
-│  - Emotions     │      └──────────────┘
-└─────────────────┘
-```
-
-## 🚀 Getting Started
-
+## Quick Start
 ### Prerequisites
+- Python 3.11+ recommended
+- Node 18+
+- npm 9+
 
-```bash
-# Check versions
-python --version  # 3.11+
-node --version    # 18+
-npm --version     # 9+
-```
-
-### Installation
-
-#### 1️⃣ Clone Repository
-```bash
-git clone https://github.com/yourusername/amazon-review-intelligence.git
-cd amazon-review-intelligence
-```
-
-#### 2️⃣ Backend Setup
+### 1) Backend
 ```bash
 cd backend
-
-# Create virtual environment
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
+source venv/bin/activate
 pip install -r requirements.txt
-
-# Download NLTK data
 python -m nltk.downloader punkt stopwords vader_lexicon
-
-# Copy environment file
 cp .env.example .env
-
-# Edit .env and add your API keys
-nano .env
 ```
 
-**Required Environment Variables:**
-```env
-APIFY_API_TOKEN=your_apify_token_here
-OPENAI_API_KEY=your_openai_key_here  # Optional
-DEBUG=True
-ENABLE_AI=True
-ENABLE_EMOTIONS=True
-MAX_REVIEWS_PER_REQUEST=100
-```
-
-#### 3️⃣ Frontend Setup
-```bash
-cd ../frontend
-
-# Install dependencies
-npm install
-
-# Copy environment file
-cp .env.example .env.local
-
-# Edit .env.local
-nano .env.local
-```
-
-**Frontend Environment:**
-```env
-NEXT_PUBLIC_API_URL=http://localhost:8000
-NEXT_PUBLIC_APIFY_TOKEN=your_token_here
-```
-
-### Running Locally
-
-#### Terminal 1 - Backend
+Run backend:
 ```bash
 cd backend
 source venv/bin/activate
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-#### Terminal 2 - Frontend
+### 2) Frontend
+```bash
+cd frontend
+npm install
+cp .env.example .env.local
+npm run dev
+```
+
+Access:
+- Frontend: `http://localhost:3000`
+- Backend: `http://localhost:8000`
+- Docs: `http://localhost:8000/docs`
+
+## Environment Variables
+Use `backend/.env.example` as source of truth.
+
+Important backend vars:
+- `DATABASE_URL` (default dev: `sqlite:///./dev.db`)
+- `USE_DATABASE`
+- `REDIS_URL`
+- `REDIS_TTL_SECONDS`
+- `ENABLE_CACHE`
+- `SESSION_COOKIE_NAME`
+- `SESSION_TTL_HOURS`
+- `COOKIE_SECURE`
+- `APIFY_API_TOKEN`
+- `ENABLE_AI`
+
+Important frontend vars:
+- `NEXT_PUBLIC_API_URL`
+
+## API Documentation
+### Public
+- `GET /`
+- `GET /health`
+- `GET /api/v1/growth/{asin}`
+- `POST /api/v1/insights`
+
+### Auth
+- `POST /api/v1/auth/signup`
+- `POST /api/v1/auth/login`
+- `POST /api/v1/auth/logout`
+- `GET /api/v1/auth/me`
+
+### Protected (session required)
+- `POST /api/v1/analyze`
+- `POST /api/v1/export/csv`
+- `POST /api/v1/export/pdf`
+- `GET /api/v1/cache/results`
+
+### Analyze Request Example
+```json
+{
+  "asin": "B08N5WRWNW",
+  "country": "US",
+  "max_reviews": 100,
+  "enable_ai": true
+}
+```
+
+## Caching Behavior
+When `ENABLE_CACHE=true`, backend applies read-through Redis caching on `POST /api/v1/analyze`.
+
+Cache key policy:
+- `analysis:{asin}:{country}:{max_reviews}:{enable_ai}`
+
+Notes:
+- shared/global by request parameters (not user-scoped)
+- TTL controlled by `REDIS_TTL_SECONDS`
+
+## Auth Behavior
+- Cookie-based session auth (`HttpOnly`, `SameSite` configurable via `COOKIE_SAMESITE`)
+- `Secure` cookie forced in production
+- Session records stored server-side in `user_sessions`
+- For cross-domain frontend/backend deployments, set:
+  - `COOKIE_SAMESITE=none`
+  - `COOKIE_SECURE=true`
+
+## Database & Migrations
+- Alembic config: `backend/alembic.ini`
+- Migration folder: `backend/alembic/versions/`
+- Initial auth/subscription migration exists and is applied in local dev setup
+
+Run migration manually:
+```bash
+cd backend
+./venv/bin/alembic upgrade head
+```
+
+## Notes on Exports
+- `POST /api/v1/export/csv` currently uses exporter flow that writes spreadsheet-style output (historical naming kept for API compatibility).
+- `POST /api/v1/export/pdf` generates a PDF report.
+
+## Testing
+Backend quick tests:
+```bash
+cd backend
+./venv/bin/python -m pytest
+```
+
+Frontend:
 ```bash
 cd frontend
 npm run dev
 ```
 
-### Access Application
-- **Frontend**: http://localhost:3000
-- **Backend API**: http://localhost:8000
-- **API Docs**: http://localhost:8000/docs
-- **Health Check**: http://localhost:8000/health
+## Deployment
+Current repo includes multiple deployment manifests (`render.yaml`, `backend/Render.yaml`, Docker compose files, Fly config).
+For backend runtime command, use:
+- `uvicorn main:app --host 0.0.0.0 --port $PORT`
 
-## 🌐 Deployment
-
-### Backend (Render)
-
-1. **Create Render Account**: https://render.com
-2. **Create New Web Service**
-3. **Connect GitHub Repository**
-4. **Configure Settings:**
-   ```
-   Name: amazon-review-intelligence-api
-   Environment: Python
-   Branch: main
-   Build Command: pip install -r requirements.txt && python -m nltk.downloader punkt stopwords vader_lexicon
-   Start Command: uvicorn app.main:app --host 0.0.0.0 --port $PORT
-   ```
-5. **Add Environment Variables** (from Render dashboard)
-6. **Deploy!**
-
-### Frontend (Vercel)
-
-1. **Install Vercel CLI**:
-   ```bash
-   npm install -g vercel
-   ```
-
-2. **Deploy**:
-   ```bash
-   cd frontend
-   vercel --prod
-   ```
-
-3. **Or use Vercel Dashboard**:
-   - Connect GitHub repo
-   - Auto-deploy on push to main
-   - Configure environment variables
-
-### CI/CD Setup
-
-1. **Add GitHub Secrets**:
-   - `RENDER_API_KEY`
-   - `RENDER_SERVICE_ID`
-   - `VERCEL_TOKEN`
-   - `VERCEL_ORG_ID`
-   - `VERCEL_PROJECT_ID`
-   - `APIFY_API_TOKEN`
-   - `OPENAI_API_KEY`
-
-2. **Copy Workflow File**:
-   ```bash
-   mkdir -p .github/workflows
-   cp .github-workflows-deploy.yml .github/workflows/deploy.yml
-   ```
-
-3. **Push to GitHub**:
-   ```bash
-   git add .
-   git commit -m "Add CI/CD pipeline"
-   git push origin main
-   ```
-
-## 📚 API Documentation
-
-### Endpoints
-
-#### Health Check
-```http
-GET /health
-```
-
-#### Analyze Reviews
-```http
-POST /api/v1/reviews/analyze
-Content-Type: application/json
-
-{
-  "asin": "B08N5WRWNW",
-  "country": "US",
-  "max_reviews": 100,
-  "enable_ai": true,
-  "enable_emotions": true
-}
-```
-
-#### Get Sentiment Analysis
-```http
-GET /api/v1/reviews/sentiment/{asin}
-```
-
-### Response Example
-```json
-{
-  "success": true,
-  "data": {
-    "product_info": {
-      "asin": "B08N5WRWNW",
-      "title": "Product Name",
-      "rating": 4.5
-    },
-    "sentiment_analysis": {
-      "overall_sentiment": "positive",
-      "positive_percentage": 75.5,
-      "negative_percentage": 15.2,
-      "neutral_percentage": 9.3
-    },
-    "emotions": {
-      "joy": 0.65,
-      "surprise": 0.15,
-      "anger": 0.10
-    },
-    "keywords": [
-      {"word": "quality", "frequency": 45},
-      {"word": "fast", "frequency": 32}
-    ]
-  }
-}
-```
-
-Full API documentation available at: `http://localhost:8000/docs`
-
-## 🧪 Testing
-
-### Backend Tests
-```bash
-cd backend
-pytest tests/ --cov=app --cov-report=html
-```
-
-### Frontend Tests
-```bash
-cd frontend
-npm test
-npm run test:e2e
-```
-
-## 📊 Performance Optimization
-
-### Backend
-- ✅ Response caching with Redis
-- ✅ Batch processing for reviews
-- ✅ Async I/O operations
-- ✅ Connection pooling
-- ✅ Rate limiting
-
-### Frontend
-- ✅ Code splitting
-- ✅ Image optimization
-- ✅ Lazy loading
-- ✅ CDN deployment
-- ✅ Bundle size optimization
-
-## 🤝 Contributing
-
-Contributions are welcome! Please follow these steps:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-### Development Guidelines
-- Follow PEP 8 for Python code
-- Use ESLint/Prettier for TypeScript
-- Write tests for new features
-- Update documentation
-
-## 🐛 Known Issues & Roadmap
-
-### Known Issues
-- [ ] Heavy models may timeout on free hosting tiers
-- [ ] Rate limiting needs tuning for high traffic
-
-### Roadmap
+## Roadmap
 - [ ] Multi-product comparison
 - [ ] Historical trend analysis
 - [ ] Email report scheduling
-- [ ] Authentication system
+- [x] Authentication system
+- [ ] Subscription checkout + webhook integration (Razorpay)
 - [ ] Admin dashboard
-- [ ] Webhook integrations
 
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
-
-- Apify for Amazon scraping API
-- Hugging Face for NLP models
-- FastAPI for the amazing framework
-- Next.js team for the frontend framework
-
-## 📞 Support
-
-- **Issues**: [GitHub Issues](https://github.com/yourusername/amazon-review-intelligence/issues)
-- **Email**: support@yourproject.com
-- **Documentation**: [Wiki](https://github.com/yourusername/amazon-review-intelligence/wiki)
-
----
-
-**Made with ❤️ by Technolity**
-
-⭐ Star this repo if you find it helpful!
-
+## License
+MIT (see `LICENSE`).

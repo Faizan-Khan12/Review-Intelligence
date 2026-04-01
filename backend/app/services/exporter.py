@@ -220,8 +220,8 @@ class Exporter:
             sentiment_title = Paragraph("<b>Sentiment Distribution</b>", styles['Heading2'])
             story.append(sentiment_title)
 
-            sentiment = analysis_data.get('sentiment_distribution', {})
-            total_reviews = analysis_data.get('total_reviews', 1)
+            sentiment = analysis_data.get('sentiment_distribution') or {}
+            total_reviews = max(analysis_data.get('total_reviews', 0), 1)
             sentiment_data = [
                 ['Sentiment', 'Count', 'Percentage'],
                 ['Positive', str(sentiment.get('positive', 0)), f"{sentiment.get('positive', 0) / total_reviews * 100:.1f}%"],

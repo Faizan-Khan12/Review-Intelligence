@@ -30,6 +30,14 @@ reportlab
 openpyxl
 XlsxWriter
 
+# Database, Cache, and Auth
+SQLAlchemy
+alembic
+psycopg2-binary
+redis
+passlib[bcrypt]
+bcrypt<4
+
 # Utilities
 python-multipart
 PyYAML

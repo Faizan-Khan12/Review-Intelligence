@@ -77,9 +77,13 @@ dependencies = [
     "XlsxWriter>=3.2.0,<4.0.0",
     "pypdf>=5.1.0,<6.0.0",
     
-    # Database
+    # Database, Cache, and Auth
     "SQLAlchemy>=2.0.0,<3.0.0",
+    "alembic>=1.14.0,<2.0.0",
     "psycopg2-binary>=2.9.0,<3.0.0",
+    "redis>=5.2.0,<6.0.0",
+    "passlib[bcrypt]>=1.7.4,<2.0.0",
+    "bcrypt>=3.2.0,<4.0.0",
     
     # Utilities
     "python-multipart>=0.0.20,<0.1.0",
@@ -120,7 +124,7 @@ Repository = "https://github.com/yourusername/amazon-review-intelligence"
 Issues = "https://github.com/yourusername/amazon-review-intelligence/issues"
 
 [project.scripts]
-ari-server = "app.main:run_server"
+ari-server = "main:run_server"
 
 [tool.setuptools]
 packages = ["app"]

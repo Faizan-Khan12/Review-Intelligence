@@ -6,17 +6,15 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
-  BarChart3, TrendingUp, Activity, Heart, Star, Eye,
-  MessageSquare, ThumbsUp, Clock, Sparkles
+  BarChart3, Activity, Heart, Star, Eye,
+  MessageSquare, ThumbsUp, Sparkles
 } from 'lucide-react';
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, RadarChart, Radar,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
-  Cell, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ScatterChart,
-  Scatter, ZAxis
+  Cell, PolarGrid, PolarAngleAxis, PolarRadiusAxis
 } from 'recharts';
 import type { AnalysisResult } from '@/types';
-import { cn } from '@/lib/utils';
 
 interface GraphAreaProps {
   analysis: AnalysisResult | null;
@@ -88,8 +86,6 @@ interface SentimentPieData {
   value: number;
   fill: string;
 }
-
-// frontend/components/GraphArea.tsx - REPLACE Custom Tooltip Components (around line 93-150)
 
 const KeywordTooltip = ({ active, payload }: any) => {
   if (active && payload && payload.length) {
@@ -196,22 +192,10 @@ const AnimatedBar = (props: any) => {
   );
 };
 
-// Active Dot with Pulse
-const ActiveDot = (props: any) => {
-  const { cx, cy, fill } = props;
-  return (
-    <g>
-      <circle cx={cx} cy={cy} r={4} fill={fill} className="animate-pulse" />
-      <circle cx={cx} cy={cy} r={6} fill={fill} opacity={0.3} />
-    </g>
-  );
-};
-
-export default function GraphArea({ analysis, isLoading, onViewDetails, aiEnabled }: GraphAreaProps) {
+export default function GraphArea({ analysis, isLoading, onViewDetails }: GraphAreaProps) {
   const [activeTab, setActiveTab] = useState('overview');
   const [isMobile, setIsMobile] = useState(false);
   const [isTablet, setIsTablet] = useState(false);
-  const [hoveredLine, setHoveredLine] = useState<string | null>(null);
 
   // Detect device
   useEffect(() => {
@@ -248,16 +232,13 @@ export default function GraphArea({ analysis, isLoading, onViewDetails, aiEnable
       };
     }
 
-    // frontend/components/GraphArea.tsx - Line 240-248 REPLACE
-const keywords: KeywordData[] = (analysis.top_keywords || []).slice(0, 15).map(kw => ({
+    const keywords: KeywordData[] = (analysis.top_keywords || []).slice(0, 15).map(kw => ({
   word: kw.word,
   frequency: kw.frequency,
   sentiment: 'neutral',
   size: Math.min(kw.frequency * 5, 100)
 }));
-// frontend/components/GraphArea.tsx - REPLACE Lines 250-260
-// Themes
-const themes: ThemeData[] = (analysis.themes || []).map((theme, idx) => {
+    const themes: ThemeData[] = (analysis.themes || []).map((theme, idx) => {
   if (typeof theme === 'string') {
     return {
       theme: theme,
@@ -308,24 +289,74 @@ const themes: ThemeData[] = (analysis.themes || []).map((theme, idx) => {
       { name: 'Negative', value: sentDist.negative, fill: COLORS.negative }
     ].filter(item => item.value > 0);
 
-    // Sentiment Trend (mock data for now - would need temporal data from backend)
+    // Sentiment Trend:
+    // 1) Prefer valid dated buckets when available.
+    // 2) Fall back to sequential buckets when dates are missing/invalid.
     const reviews = analysis.reviews || [];
-    const dateMap = new Map<string, { positive: number; negative: number; neutral: number }>();
-    
-    reviews.forEach(review => {
-      const date = review.date ? new Date(review.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'Unknown';
-      if (!dateMap.has(date)) {
-        dateMap.set(date, { positive: 0, negative: 0, neutral: 0 });
+    const datedBuckets = new Map<string, { positive: number; negative: number; neutral: number }>();
+    const sequentialSentiments: Array<'positive' | 'neutral' | 'negative'> = [];
+
+    const normalizeSentiment = (review: any): 'positive' | 'neutral' | 'negative' => {
+      const raw = String(review?.sentiment || '').toLowerCase();
+      if (raw === 'positive' || raw === 'neutral' || raw === 'negative') {
+        return raw;
       }
-      const counts = dateMap.get(date)!;
-      const rating = review.stars ?? review.stars ?? 3;
-      const sentiment = review.sentiment || (rating >= 4 ? 'positive' : rating <= 2 ? 'negative' : 'neutral');
-      counts[sentiment as keyof typeof counts]++;
+      const rating = typeof review?.stars === 'number' ? review.stars : 3;
+      if (rating >= 4) return 'positive';
+      if (rating <= 2) return 'negative';
+      return 'neutral';
+    };
+
+    reviews.forEach((review) => {
+      const sentiment = normalizeSentiment(review);
+      sequentialSentiments.push(sentiment);
+
+      if (!review?.date) return;
+      const parsed = new Date(review.date);
+      if (Number.isNaN(parsed.getTime())) return;
+
+      const isoDay = parsed.toISOString().split('T')[0];
+      if (!datedBuckets.has(isoDay)) {
+        datedBuckets.set(isoDay, { positive: 0, negative: 0, neutral: 0 });
+      }
+      const bucket = datedBuckets.get(isoDay)!;
+      bucket[sentiment] += 1;
     });
 
-    const sentimentTrend: SentimentTrendData[] = Array.from(dateMap.entries())
-      .map(([date, counts]) => ({ date, ...counts }))
-      .slice(0, 10);
+    let sentimentTrend: SentimentTrendData[] = [];
+
+    if (datedBuckets.size >= 2) {
+      sentimentTrend = Array.from(datedBuckets.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([isoDay, counts]) => ({
+          date: new Date(isoDay).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+          ...counts
+        }))
+        .slice(-10);
+    } else if (sequentialSentiments.length > 0) {
+      const points = Math.min(10, sequentialSentiments.length);
+      const chunkSize = Math.ceil(sequentialSentiments.length / points);
+
+      for (let i = 0; i < sequentialSentiments.length; i += chunkSize) {
+        const chunk = sequentialSentiments.slice(i, i + chunkSize);
+        const counts = { positive: 0, neutral: 0, negative: 0 };
+        chunk.forEach((s) => {
+          counts[s] += 1;
+        });
+
+        sentimentTrend.push({
+          date: `Set ${Math.floor(i / chunkSize) + 1}`,
+          ...counts
+        });
+      }
+    } else if (sentTotal > 0) {
+      sentimentTrend = [{
+        date: 'Current',
+        positive: sentDist.positive,
+        neutral: sentDist.neutral,
+        negative: sentDist.negative
+      }];
+    }
 
     // Stats
     const avgRating = analysis.average_rating || 0;
@@ -584,7 +615,7 @@ const themes: ThemeData[] = (analysis.themes || []).map((theme, idx) => {
                           tick={{ fontSize: isMobile ? 8 : isTablet ? 9 : 10 }}
                         />
                         <YAxis tick={{ fontSize: isMobile ? 9 : isTablet ? 10 : 12 }} />
-                        <Tooltip content={<KeywordTooltip />} cursor={false} />
+                        <Tooltip content={<ThemeTooltip />} cursor={false} />
                         <Bar dataKey="mentions" radius={[8, 8, 0, 0]} shape={<AnimatedBar />}>
                           {themeData.map((entry, index) => (
                             <Cell key={`cell-${index}`} fill={entry.fill} />
@@ -603,65 +634,64 @@ const themes: ThemeData[] = (analysis.themes || []).map((theme, idx) => {
             <div className="grid grid-cols-1 gap-3 sm:gap-4 md:gap-6">
               {/* Sentiment Trend */}
               {sentimentTrendData.length > 0 && (
-               // frontend/components/GraphArea.tsx - REPLACE Sentiment Trend Chart (around line 500-530)
-<Card className="border-0 shadow-lg hover:shadow-xl transition-all bg-card/50 backdrop-blur">
-  <CardHeader className="pb-2 md:pb-3 px-3 sm:px-4 md:px-6">
-    <CardTitle className="text-xs sm:text-sm md:text-base font-semibold flex items-center gap-2">
-      <Activity className="h-3 w-3 sm:h-4 sm:w-4 text-primary flex-shrink-0" />
-      Sentiment Trends
-    </CardTitle>
-  </CardHeader>
-  <CardContent className="px-2 sm:px-3 md:px-6 pb-2 sm:pb-3 md:pb-4">
-    <ResponsiveContainer width="100%" height={200} className="md:h-[250px]">
-      <LineChart data={sentimentTrendData}>
-        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.3} />
-        <XAxis 
-          dataKey="date" 
-          stroke="hsl(var(--muted-foreground))"
-          tick={{ fontSize: 10 }}
-          className="sm:text-xs"
-        />
-        <YAxis 
-          stroke="hsl(var(--muted-foreground))"
-          tick={{ fontSize: 10 }}
-          className="sm:text-xs"
-        />
-        <Tooltip content={<KeywordTooltip />} cursor={false} />
-        <Legend 
-          wrapperStyle={{ fontSize: '10px' }}
-          className="sm:text-xs"
-        />
-        <Line 
-          type="monotone" 
-          dataKey="positive" 
-          stroke={COLORS.positive} 
-          strokeWidth={2}
-          dot={{ fill: COLORS.positive, r: 3 }}
-          activeDot={{ r: 5 }}
-          name="Positive"
-        />
-        <Line 
-          type="monotone" 
-          dataKey="neutral" 
-          stroke={COLORS.neutral} 
-          strokeWidth={2}
-          dot={{ fill: COLORS.neutral, r: 3 }}
-          activeDot={{ r: 5 }}
-          name="Neutral"
-        />
-        <Line 
-          type="monotone" 
-          dataKey="negative" 
-          stroke={COLORS.negative} 
-          strokeWidth={2}
-          dot={{ fill: COLORS.negative, r: 3 }}
-          activeDot={{ r: 5 }}
-          name="Negative"
-        />
-      </LineChart>
-    </ResponsiveContainer>
-  </CardContent>
-</Card>
+                <Card className="border-0 shadow-lg hover:shadow-xl transition-all bg-card/50 backdrop-blur">
+                  <CardHeader className="pb-2 md:pb-3 px-3 sm:px-4 md:px-6">
+                    <CardTitle className="text-xs sm:text-sm md:text-base font-semibold flex items-center gap-2">
+                      <Activity className="h-3 w-3 sm:h-4 sm:w-4 text-primary flex-shrink-0" />
+                      Sentiment Trends
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="px-2 sm:px-3 md:px-6 pb-2 sm:pb-3 md:pb-4">
+                    <ResponsiveContainer width="100%" height={200} className="md:h-[250px]">
+                      <LineChart data={sentimentTrendData}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.3} />
+                        <XAxis
+                          dataKey="date"
+                          stroke="hsl(var(--muted-foreground))"
+                          tick={{ fontSize: 10 }}
+                          className="sm:text-xs"
+                        />
+                        <YAxis
+                          stroke="hsl(var(--muted-foreground))"
+                          tick={{ fontSize: 10 }}
+                          className="sm:text-xs"
+                        />
+                        <Tooltip content={<SentimentTrendTooltip />} cursor={false} />
+                        <Legend
+                          wrapperStyle={{ fontSize: '10px' }}
+                          className="sm:text-xs"
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="positive"
+                          stroke={COLORS.positive}
+                          strokeWidth={2}
+                          dot={{ fill: COLORS.positive, r: 3 }}
+                          activeDot={{ r: 5 }}
+                          name="Positive"
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="neutral"
+                          stroke={COLORS.neutral}
+                          strokeWidth={2}
+                          dot={{ fill: COLORS.neutral, r: 3 }}
+                          activeDot={{ r: 5 }}
+                          name="Neutral"
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="negative"
+                          stroke={COLORS.negative}
+                          strokeWidth={2}
+                          dot={{ fill: COLORS.negative, r: 3 }}
+                          activeDot={{ r: 5 }}
+                          name="Negative"
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </CardContent>
+                </Card>
               )}
             </div>
           </TabsContent>
@@ -704,7 +734,7 @@ const themes: ThemeData[] = (analysis.themes || []).map((theme, idx) => {
                           domain={[0, 1]}
                           tick={{ fontSize: isMobile ? 8 : 9 }}
                         />
-                       <Tooltip content={<KeywordTooltip />} cursor={false} />
+                       <Tooltip content={<EmotionTooltip />} cursor={false} />
                         <Radar
                           name="Emotion Intensity"
                           dataKey="value"

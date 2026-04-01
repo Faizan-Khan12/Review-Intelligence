@@ -3,7 +3,7 @@ Amazon Review Intelligence - Production Backend
 Real-time Apify Integration with AI/NLP Analysis
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Depends, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from contextlib import asynccontextmanager
@@ -15,6 +15,7 @@ import json
 import traceback
 from collections import defaultdict
 from io import BytesIO
+from sqlalchemy.orm import Session
 
 # Load environment first
 from dotenv import load_dotenv
@@ -64,6 +65,40 @@ except ImportError as e:
     OPENAI_AVAILABLE = False
     print(f"⚠️ OpenAI service not available: {e}")
 
+# Import auth dependencies
+try:
+    from app.db.session import get_db
+    from app.services.auth_service import auth_service
+    AUTH_AVAILABLE = True
+    print("✅ Auth service loaded")
+except ImportError as e:
+    AUTH_AVAILABLE = False
+    print(f"⚠️ Auth service not available: {e}")
+
+# Import cache service
+try:
+    from app.services.cache_service import cache_service
+    CACHE_AVAILABLE = True
+    print("✅ Cache service loaded")
+except ImportError as e:
+    CACHE_AVAILABLE = False
+    print(f"⚠️ Cache service not available: {e}")
+
+    class _NoOpCacheService:
+        def get(self, key: str):
+            return None
+
+        def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None):
+            return False
+
+        def delete(self, key: str):
+            return False
+
+        def list_analysis_entries(self, limit: int = 20, include_payload: bool = False):
+            return []
+
+    cache_service = _NoOpCacheService()
+
 # Initialize components
 vader_analyzer = SentimentIntensityAnalyzer()
 
@@ -73,6 +108,7 @@ class Config:
     APP_NAME = os.getenv("APP_NAME", "Amazon Review Intelligence")
     APP_VERSION = os.getenv("APP_VERSION", "2.0.0")
     DEBUG = os.getenv("DEBUG", "true").lower() == "true"
+    ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
     
     # Server
     HOST = os.getenv("HOST", "0.0.0.0")
@@ -92,6 +128,12 @@ class Config:
     ENABLE_AI = os.getenv("ENABLE_AI", "true").lower() == "true"
     MAX_REVIEWS = int(os.getenv("MAX_REVIEWS_PER_REQUEST", "100"))
     USE_MOCK_FALLBACK = os.getenv("USE_MOCK_FALLBACK", "true").lower() == "true"
+
+    # Auth/session
+    SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "ari_session")
+    SESSION_TTL_HOURS = int(os.getenv("SESSION_TTL_HOURS", "24"))
+    COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
+    COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax").lower()
 
 config = Config()
 
@@ -179,6 +221,69 @@ def analyze_sentiment(text: str) -> Dict:
         "polarity": blob.sentiment.polarity,
         "subjectivity": blob.sentiment.subjectivity
     }
+
+
+def build_analysis_cache_key(asin: str, country: str, max_reviews: int, enable_ai: bool) -> str:
+    """Build cache key for analysis endpoint response."""
+    return f"analysis:{asin}:{country}:{max_reviews}:{int(bool(enable_ai))}"
+
+
+def _cookie_secure_flag() -> bool:
+    """Enable secure cookies in production by default."""
+    if config.ENVIRONMENT == "production":
+        return True
+    return config.COOKIE_SECURE
+
+
+def _cookie_samesite_value() -> str:
+    """Resolve SameSite policy with production-safe defaults."""
+    configured = (config.COOKIE_SAMESITE or "").lower().strip()
+    if configured in {"lax", "strict", "none"}:
+        return configured
+    return "none" if config.ENVIRONMENT == "production" else "lax"
+
+
+def _set_session_cookie(response: Response, token: str) -> None:
+    """Set session cookie with consistent security attributes."""
+    max_age = config.SESSION_TTL_HOURS * 3600
+    samesite = _cookie_samesite_value()
+    response.set_cookie(
+        key=config.SESSION_COOKIE_NAME,
+        value=token,
+        max_age=max_age,
+        expires=max_age,
+        path="/",
+        secure=_cookie_secure_flag(),
+        httponly=True,
+        samesite=samesite,
+    )
+
+
+def _clear_session_cookie(response: Response) -> None:
+    """Clear session cookie."""
+    samesite = _cookie_samesite_value()
+    response.delete_cookie(
+        key=config.SESSION_COOKIE_NAME,
+        path="/",
+        secure=_cookie_secure_flag(),
+        httponly=True,
+        samesite=samesite,
+    )
+
+
+def get_current_user(request: Request, db: Session = Depends(get_db)):
+    """Resolve current authenticated user from session cookie."""
+    if not AUTH_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Auth service unavailable")
+
+    session_token = request.cookies.get(config.SESSION_COOKIE_NAME)
+    if not session_token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    user = auth_service.get_user_from_session_token(db, session_token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Session invalid or expired")
+    return user
 
 def extract_keywords(texts: List[str], top_n: int = 10) -> List[Dict]:
     """Extract keywords from texts"""
@@ -857,7 +962,8 @@ async def root():
             "health": "/health",
             "docs": "/docs",
             "analyze": "/api/v1/analyze",
-            "growth": "/api/v1/growth/{asin}"
+            "growth": "/api/v1/growth/{asin}",
+            "cache_results": "/api/v1/cache/results",
         }
     }
 
@@ -874,40 +980,166 @@ async def health():
         }
     }
 
+
+@app.post("/api/v1/auth/signup")
+async def signup(request: Dict, response: Response, db: Session = Depends(get_db)):
+    """Register user and create session cookie."""
+    if not AUTH_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Auth service unavailable")
+
+    email = str(request.get("email", "")).strip().lower()
+    password = str(request.get("password", ""))
+
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+    if not password:
+        raise HTTPException(status_code=400, detail="Password is required")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+
+    try:
+        user = auth_service.create_user(db, email, password)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    session_token = auth_service.create_session(db, user.id, config.SESSION_TTL_HOURS)
+    _set_session_cookie(response, session_token)
+
+    return {
+        "success": True,
+        "message": "Signup successful",
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "is_active": user.is_active,
+        },
+    }
+
+
+@app.post("/api/v1/auth/login")
+async def login(request: Dict, response: Response, db: Session = Depends(get_db)):
+    """Authenticate user and create session cookie."""
+    if not AUTH_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Auth service unavailable")
+
+    email = str(request.get("email", "")).strip().lower()
+    password = str(request.get("password", ""))
+
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="Email and password are required")
+
+    user = auth_service.authenticate_user(db, email, password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    session_token = auth_service.create_session(db, user.id, config.SESSION_TTL_HOURS)
+    _set_session_cookie(response, session_token)
+
+    return {
+        "success": True,
+        "message": "Login successful",
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "is_active": user.is_active,
+        },
+    }
+
+
+@app.post("/api/v1/auth/logout")
+async def logout(request: Request, response: Response, db: Session = Depends(get_db)):
+    """Revoke current session and clear cookie."""
+    if not AUTH_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Auth service unavailable")
+
+    session_token = request.cookies.get(config.SESSION_COOKIE_NAME)
+    if session_token:
+        auth_service.revoke_session(db, session_token)
+
+    _clear_session_cookie(response)
+    return {"success": True, "message": "Logout successful"}
+
+
+@app.get("/api/v1/auth/me")
+async def me(current_user=Depends(get_current_user)):
+    """Return authenticated user profile from session cookie."""
+    return {
+        "success": True,
+        "user": {
+            "id": current_user.id,
+            "email": current_user.email,
+            "is_active": current_user.is_active,
+        },
+    }
+
+
+@app.get("/api/v1/cache/results")
+async def get_cached_results(
+    limit: int = 20,
+    include_payload: bool = True,
+    _current_user=Depends(get_current_user),
+):
+    """Return recent cached analysis entries for inspection/reuse."""
+    safe_limit = max(1, min(int(limit), 100))
+    entries = cache_service.list_analysis_entries(limit=safe_limit, include_payload=include_payload)
+    return {
+        "success": True,
+        "count": len(entries),
+        "cache_enabled": bool(getattr(cache_service, "enabled", False)),
+        "results": entries,
+    }
+
+
 @app.post("/api/v1/analyze")
-async def analyze_product(request: Dict):
+async def analyze_product(request: Dict, _current_user=Depends(get_current_user)):
     """Main analysis endpoint - FLAT response structure"""
     try:
         asin = request.get("asin")
         if not asin:
             raise HTTPException(status_code=400, detail="ASIN is required")
-        
-        max_reviews = min(request.get("max_reviews", 50), config.MAX_REVIEWS)
+
+        asin = str(asin).strip()
+        max_reviews = min(int(request.get("max_reviews", 50)), config.MAX_REVIEWS)
         enable_ai = request.get("enable_ai", config.ENABLE_AI)
-        country = request.get("country", "US")
-        
+        country = str(request.get("country", "US")).upper().strip()
+
         logger.info(f"🔍 Analyzing ASIN: {asin}")
-        
+
+        cache_key = build_analysis_cache_key(asin, country, max_reviews, bool(enable_ai))
+        cached_response = cache_service.get(cache_key)
+        if cached_response and cached_response.get("success"):
+            logger.info(f"⚡ Cache HIT for {cache_key}")
+            cached_payload = dict(cached_response)
+            cached_payload["from_cache"] = True
+            growth_data_store[asin].append({
+                "timestamp": datetime.utcnow().isoformat(),
+                "review_count": cached_payload.get("total_reviews", 0),
+                "rating": cached_payload.get("average_rating", 0)
+            })
+            return cached_payload
+
+        logger.info(f"🧊 Cache MISS for {cache_key}")
+
         # Fetch reviews (Apify or mock)
         reviews_data = await fetch_apify_reviews(asin, max_reviews, country)
-        
+
         if not reviews_data.get("success"):
             return reviews_data
-        
+
         # AI/NLP analysis
         if enable_ai and reviews_data.get("reviews"):
             analysis = analyze_reviews(reviews_data["reviews"])
             reviews_data.update(analysis)
-        
+
         # Store growth data point
         growth_data_store[asin].append({
             "timestamp": datetime.utcnow().isoformat(),
             "review_count": reviews_data.get("total_reviews", 0),
             "rating": reviews_data.get("average_rating", 0)
         })
-        
+
         # ✅ RETURN FLAT STRUCTURE - NO NESTING
-        return {
+        response_payload = {
             "success": True,
             "asin": asin,
             "country": country,
@@ -925,9 +1157,13 @@ async def analyze_product(request: Dict):
             "summaries": reviews_data.get("summaries"),
             "insights": reviews_data.get("insights", []),
             "data_source": reviews_data.get("data_source", "unknown"),
+            "from_cache": False,
             "timestamp": datetime.utcnow().isoformat(),
             "processing_time": reviews_data.get("processing_time")
         }
+
+        cache_service.set(cache_key, response_payload)
+        return response_payload
         
     except HTTPException:
         raise
@@ -975,7 +1211,7 @@ async def generate_insights(request: Dict):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/export/csv")
-async def export_csv(request: Dict):
+async def export_csv(request: Dict, _current_user=Depends(get_current_user)):
     """Export analysis to CSV"""
     try:
         if not EXPORTER_AVAILABLE:
@@ -1015,7 +1251,7 @@ async def export_csv(request: Dict):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/export/pdf")
-async def export_pdf(request: Dict):
+async def export_pdf(request: Dict, _current_user=Depends(get_current_user)):
     """Export analysis to PDF"""
     try:
         if not EXPORTER_AVAILABLE:
@@ -1069,7 +1305,8 @@ async def server_error(request: Request, exc):
 
 # ============= RUN SERVER =============
 
-if __name__ == "__main__":
+def run_server():
+    """CLI entrypoint for local/dev server startup."""
     uvicorn.run(
         "main:app",
         host=config.HOST,
@@ -1077,3 +1314,6 @@ if __name__ == "__main__":
         reload=config.DEBUG,
         log_level="info"
     )
+
+if __name__ == "__main__":
+    run_server()

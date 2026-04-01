@@ -122,53 +122,58 @@ ${url}`);
     }
   };
 
-const handleExport = async (format: string) => {
-  setIsExporting(true);
-  try {
-    toast({
-      title: `📥 Exporting ${format.toUpperCase()}`,
-      description: 'Preparing your export file...',
-    });
+  const handleExport = async (format: string) => {
+    setIsExporting(true);
+    try {
+      toast({
+        title: `📥 Exporting ${format.toUpperCase()}`,
+        description: 'Preparing your export file...',
+      });
 
-    const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-    
-    const response = await fetch(`${API_URL}/api/v1/export/${format}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(analysis),
-    });
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
-    if (!response.ok) {
-      throw new Error('Export failed');
+      // Map format to backend endpoint (csv endpoint generates xlsx)
+      const endpoint = format === 'xlsx' ? 'csv' : format;
+      const fileExt = format === 'csv' ? 'xlsx' : format;
+
+      const response = await fetch(`${API_URL}/api/v1/export/${endpoint}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ analysis_data: analysis }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => null);
+        throw new Error(errorData?.detail || 'Export failed');
+      }
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `detailed-analysis-${analysis.asin}-${Date.now()}.${fileExt}`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+
+      toast({
+        title: '✅ Export Complete',
+        description: `Downloaded ${format.toUpperCase()} file successfully`,
+      });
+    } catch (error: any) {
+      console.error('Export error:', error);
+      toast({
+        title: '❌ Export Failed',
+        description: error.message || 'Unable to export file. Please try again.',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsExporting(false);
     }
-
-    const blob = await response.blob();
-    const url = window.URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `detailed-analysis-${analysis.asin}-${Date.now()}.${format}`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    window.URL.revokeObjectURL(url);
-
-    toast({
-      title: '✅ Export Complete',
-      description: `Downloaded ${format.toUpperCase()} file successfully`,
-    });
-  } catch (error) {
-    console.error('Export error:', error);
-    toast({
-      title: '❌ Export Failed',
-      description: 'Unable to export file. Please try again.',
-      variant: 'destructive',
-    });
-  } finally {
-    setIsExporting(false);
-  }
-};
+  };
   const renderStarRating = (rating: number) => (
     <div className="flex">
       {[...Array(5)].map((_, i) => (
@@ -301,40 +306,40 @@ const handleExport = async (format: string) => {
         <Separator />
 
         {/* Product Info */}
-{analysis.product_info && (
-  <Card className="border-none shadow-xl bg-gradient-to-br from-primary/5 to-background">
-    <CardContent className="p-4 sm:p-6">
-      <div className="flex items-start gap-4">
-        {analysis.product_info.image_url && (
-          <img
-            src={analysis.product_info.image_url}
-            alt={analysis.product_info.title || 'Product image'}
-            className="w-20 h-20 sm:w-24 sm:h-24 object-cover rounded-lg border"
-          />
+        {analysis.product_info && (
+          <Card className="border-none shadow-xl bg-gradient-to-br from-primary/5 to-background">
+            <CardContent className="p-4 sm:p-6">
+              <div className="flex items-start gap-4">
+                {analysis.product_info.image_url && (
+                  <img
+                    src={analysis.product_info.image_url}
+                    alt={analysis.product_info.title || 'Product image'}
+                    className="w-20 h-20 sm:w-24 sm:h-24 object-cover rounded-lg border"
+                  />
+                )}
+                <div className="flex-1 min-w-0">
+                  <h2 className="text-base sm:text-lg md:text-xl font-bold mb-2">
+                    {analysis.product_info.title || 'Product'}
+                  </h2>
+                  <div className="flex flex-wrap items-center gap-2 sm:gap-4 text-xs sm:text-sm text-muted-foreground">
+                    {analysis.product_info.asin && (
+                      <div className="flex items-center gap-1.5">
+                        <Package className="h-4 w-4" />
+                        {analysis.product_info.asin}
+                      </div>
+                    )}
+                    {analysis.product_info.average_rating && (
+                      <div className="flex items-center gap-1.5">
+                        <Star className="h-4 w-4 fill-yellow-500 text-yellow-500" />
+                        {analysis.product_info.average_rating.toFixed(1)}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
         )}
-        <div className="flex-1 min-w-0">
-          <h2 className="text-base sm:text-lg md:text-xl font-bold mb-2">
-            {analysis.product_info.title || 'Product'}
-          </h2>
-          <div className="flex flex-wrap items-center gap-2 sm:gap-4 text-xs sm:text-sm text-muted-foreground">
-            {analysis.product_info.asin && (
-              <div className="flex items-center gap-1.5">
-                <Package className="h-4 w-4" />
-                {analysis.product_info.asin}
-              </div>
-            )}
-            {analysis.product_info.average_rating && (
-              <div className="flex items-center gap-1.5">
-                <Star className="h-4 w-4 fill-yellow-500 text-yellow-500" />
-                {analysis.product_info.average_rating.toFixed(1)}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    </CardContent>
-  </Card>
-)}
         {/* Executive Summary */}
         <Card className="border-none shadow-xl">
           <CardHeader>
@@ -487,7 +492,7 @@ const handleExport = async (format: string) => {
                         size === 'small' && "text-xs px-2 py-1"
                       )}
                     >
-                    {keyword.word}
+                      {keyword.word}
                     </Badge>
                   );
                 })}

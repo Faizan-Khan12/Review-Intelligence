@@ -1,12 +1,33 @@
 // frontend/lib/api.ts - COMPLETE FILE
 import axios from 'axios';
-import type { AnalysisResult } from '@/types';
+import type { AnalysisResult, CachedAnalysisResult } from '@/types';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
+export interface AuthUser {
+  id: number;
+  email: string;
+  is_active: boolean;
+}
+
+interface AuthResponse {
+  success: boolean;
+  message?: string;
+  user?: AuthUser;
+  detail?: string;
+}
+
+interface CachedResultsResponse {
+  success: boolean;
+  count: number;
+  cache_enabled: boolean;
+  results: CachedAnalysisResult[];
+}
 
 export const apiClient = axios.create({
   baseURL: API_URL,
   timeout: 90000,
+  withCredentials: true,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -110,6 +131,48 @@ export async function healthCheck(): Promise<any> {
     console.error('❌ Health check failed:', error);
     return { status: 'unhealthy', error };
   }
+}
+
+export async function signup(email: string, password: string): Promise<AuthUser> {
+  const response = await apiClient.post<AuthResponse>('/api/v1/auth/signup', { email, password });
+  if (!response.data.success || !response.data.user) {
+    throw new Error(response.data.detail || response.data.message || 'Signup failed');
+  }
+  return response.data.user;
+}
+
+export async function login(email: string, password: string): Promise<AuthUser> {
+  const response = await apiClient.post<AuthResponse>('/api/v1/auth/login', { email, password });
+  if (!response.data.success || !response.data.user) {
+    throw new Error(response.data.detail || response.data.message || 'Login failed');
+  }
+  return response.data.user;
+}
+
+export async function logout(): Promise<void> {
+  await apiClient.post<AuthResponse>('/api/v1/auth/logout');
+}
+
+export async function getCurrentUser(): Promise<AuthUser | null> {
+  try {
+    const response = await apiClient.get<AuthResponse>('/api/v1/auth/me');
+    if (response.data.success && response.data.user) {
+      return response.data.user;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export async function getCachedResults(limit: number = 20): Promise<CachedAnalysisResult[]> {
+  const response = await apiClient.get<CachedResultsResponse>('/api/v1/cache/results', {
+    params: { limit, include_payload: true },
+  });
+  if (!response.data.success) {
+    throw new Error('Unable to load cached results');
+  }
+  return response.data.results || [];
 }
 
 export function formatErrorMessage(error: any): string {

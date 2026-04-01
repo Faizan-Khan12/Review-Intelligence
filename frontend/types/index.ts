@@ -61,6 +61,20 @@ export interface AnalysisResult {
   timestamp: string;
   processing_time: number | null;
   data_source: string;
+  from_cache?: boolean;
+}
+
+export interface CachedAnalysisResult {
+  key: string;
+  asin: string;
+  country: string;
+  max_reviews: number;
+  enable_ai: boolean;
+  total_reviews: number;
+  average_rating: number;
+  timestamp: string | null;
+  data_source: string;
+  analysis?: AnalysisResult;
 }
 
 export const MAX_REVIEWS_LIMIT = 100;

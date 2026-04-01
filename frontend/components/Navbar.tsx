@@ -1,14 +1,14 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { 
-  Download, 
-  Moon, 
-  Sun, 
-  Menu, 
-  X, 
-  BarChart3, 
-  ChevronRight, 
+import {
+  Download,
+  Moon,
+  Sun,
+  Menu,
+  X,
+  BarChart3,
+  ChevronRight,
   ChevronLeft,
   PanelLeftClose,
   PanelLeftOpen
@@ -25,7 +25,7 @@ import {
 import { cn } from '@/lib/utils';
 
 interface NavbarProps {
-  onExport?: (format: 'csv' | 'pdf') => void;
+  onExport?: (format: 'csv' | 'pdf' | 'xlsx') => void;
   onToggleSidebar?: () => void;
   sidebarCollapsed?: boolean;
   isMobile?: boolean;
@@ -52,7 +52,7 @@ export default function Navbar({
   return (
     <nav className="sticky top-0 z-30 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
       <div className="flex h-14 items-center px-3 sm:px-4 md:px-6">
-        
+
         {/* Mobile Menu Button (Hamburger) */}
         {onToggleSidebar && (
           <Button
@@ -98,13 +98,13 @@ export default function Navbar({
 
         {/* Desktop Actions */}
         <div className="hidden md:flex items-center gap-2">
-          
+
           {/* Export Dropdown */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button 
-                variant="outline" 
-                size="sm" 
+              <Button
+                variant="outline"
+                size="sm"
                 className="gap-2 hover:bg-primary/10 transition-colors"
               >
                 <Download className="h-4 w-4" />
@@ -112,13 +112,19 @@ export default function Navbar({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-48">
-              <DropdownMenuItem 
+              <DropdownMenuItem
                 onClick={() => onExport?.('csv')}
                 className="cursor-pointer"
               >
                 <span className="mr-2">📊</span> Export as CSV
               </DropdownMenuItem>
-              <DropdownMenuItem 
+              <DropdownMenuItem
+                onClick={() => onExport?.('xlsx')}
+                className="cursor-pointer"
+              >
+                <span className="mr-2">📋</span> Export as Excel
+              </DropdownMenuItem>
+              <DropdownMenuItem
                 onClick={() => onExport?.('pdf')}
                 className="cursor-pointer"
               >
@@ -167,8 +173,8 @@ export default function Navbar({
           {/* Mobile Export Menu */}
           <DropdownMenu open={mobileMenuOpen} onOpenChange={setMobileMenuOpen}>
             <DropdownMenuTrigger asChild>
-              <Button 
-                variant="ghost" 
+              <Button
+                variant="ghost"
                 size="icon"
                 className="hover:bg-primary/10"
               >
@@ -176,7 +182,7 @@ export default function Navbar({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-48">
-              <DropdownMenuItem 
+              <DropdownMenuItem
                 onClick={() => {
                   onExport?.('csv');
                   setMobileMenuOpen(false);
@@ -185,7 +191,16 @@ export default function Navbar({
               >
                 <span className="mr-2">📊</span> Export CSV
               </DropdownMenuItem>
-              <DropdownMenuItem 
+              <DropdownMenuItem
+                onClick={() => {
+                  onExport?.('xlsx');
+                  setMobileMenuOpen(false);
+                }}
+                className="cursor-pointer"
+              >
+                <span className="mr-2">📋</span> Export Excel
+              </DropdownMenuItem>
+              <DropdownMenuItem
                 onClick={() => {
                   onExport?.('pdf');
                   setMobileMenuOpen(false);

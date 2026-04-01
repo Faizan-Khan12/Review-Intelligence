@@ -1,10 +1,10 @@
 'use client';
 
 import React from 'react';
-import { 
-  Sparkles, 
-  TrendingUp, 
-  AlertCircle, 
+import {
+  Sparkles,
+  TrendingUp,
+  AlertCircle,
   Star,
   CheckCircle2
 } from 'lucide-react';
@@ -20,15 +20,15 @@ interface InsightsPanelProps {
   aiEnabled?: boolean;
 }
 
-export default function InsightsPanel({ 
-  analysis, 
+export default function InsightsPanel({
+  analysis,
   isLoading = false,
-  aiEnabled = true 
+  aiEnabled = true
 }: InsightsPanelProps) {
   if (isLoading) {
     return (
       <aside className={cn(
-        "w-full lg:w-80 xl:w-96",
+        "w-full",
         "p-3 sm:p-4 md:p-6 space-y-3 md:space-y-4",
         "bg-background lg:h-full overflow-y-auto"
       )}>
@@ -49,7 +49,7 @@ export default function InsightsPanel({
   if (!analysis) {
     return (
       <aside className={cn(
-        "w-full lg:w-80 xl:w-96", 
+        "w-full",
         "p-3 sm:p-4 md:p-6 space-y-3 md:space-y-4",
         "bg-background lg:h-full"
       )}>
@@ -82,11 +82,11 @@ export default function InsightsPanel({
 
   return (
     <aside className={cn(
-      "w-full lg:w-80 xl:w-96",
+      "w-full",
       "p-3 sm:p-4 md:p-6 space-y-3 md:space-y-4",
       "bg-background lg:h-full overflow-y-auto"
     )}>
-      
+
       {/* Summary Card - Mobile Optimized */}
       <Card className="border-0 shadow-sm">
         <CardHeader className="pb-2 md:pb-3 px-3 sm:px-4">
@@ -104,7 +104,7 @@ export default function InsightsPanel({
               {totalReviews.toLocaleString()}
             </span>
           </div>
-          
+
           <div className="flex items-center justify-between">
             <span className="text-[10px] sm:text-xs md:text-sm text-muted-foreground">
               Avg Rating
@@ -142,7 +142,7 @@ export default function InsightsPanel({
               </span>
             </div>
             <Progress value={positivePercent} className="h-1 sm:h-1.5 bg-muted">
-              <div 
+              <div
                 className="h-full bg-green-500 rounded-full transition-all"
                 style={{ width: `${positivePercent}%` }}
               />
@@ -158,7 +158,7 @@ export default function InsightsPanel({
               </span>
             </div>
             <Progress value={neutralPercent} className="h-1 sm:h-1.5 bg-muted">
-              <div 
+              <div
                 className="h-full bg-yellow-500 rounded-full transition-all"
                 style={{ width: `${neutralPercent}%` }}
               />
@@ -174,7 +174,7 @@ export default function InsightsPanel({
               </span>
             </div>
             <Progress value={negativePercent} className="h-1 sm:h-1.5 bg-muted">
-              <div 
+              <div
                 className="h-full bg-red-500 rounded-full transition-all"
                 style={{ width: `${negativePercent}%` }}
               />
@@ -193,38 +193,38 @@ export default function InsightsPanel({
           </CardHeader>
           <CardContent className="px-3 sm:px-4">
             <div className="flex flex-wrap gap-1 sm:gap-1.5 md:gap-2">
-           {themes.slice(0, 6).map((theme, index) => {
-  if (typeof theme === 'string') {
-    // Render string theme differently if needed or just as a plain badge
-    return (
-      <Badge key={index} variant="secondary" className="text-xs px-2 py-1">
-        {theme}
-      </Badge>
-    );
-  }
+              {themes.slice(0, 6).map((theme, index) => {
+                if (typeof theme === 'string') {
+                  // Render string theme differently if needed or just as a plain badge
+                  return (
+                    <Badge key={index} variant="secondary" className="text-xs px-2 py-1">
+                      {theme}
+                    </Badge>
+                  );
+                }
 
-  // Now theme is guaranteed to be of type Theme
-  return (
-    <div key={index} className="flex items-center">
-      <Badge 
-        variant={
-          theme.sentiment === 'positive' ? 'default' :
-          theme.sentiment === 'negative' ? 'destructive' :
-          'secondary'
-        }
-        className="text-[9px] sm:text-[10px] md:text-xs px-1.5 sm:px-2 py-0 sm:py-0.5"
-      >
-        {theme.theme}
-      </Badge>
-      <Badge 
-        variant="outline"
-        className="ml-1 text-[8px] sm:text-[9px] md:text-[10px] px-1 py-0"
-      >
-        {theme.mentions}
-      </Badge>
-    </div>
-  );
-})}
+                // Now theme is guaranteed to be of type Theme
+                return (
+                  <div key={index} className="flex items-center">
+                    <Badge
+                      variant={
+                        theme.sentiment === 'positive' ? 'default' :
+                          theme.sentiment === 'negative' ? 'destructive' :
+                            'secondary'
+                      }
+                      className="text-[9px] sm:text-[10px] md:text-xs px-1.5 sm:px-2 py-0 sm:py-0.5"
+                    >
+                      {theme.theme}
+                    </Badge>
+                    <Badge
+                      variant="outline"
+                      className="ml-1 text-[8px] sm:text-[9px] md:text-[10px] px-1 py-0"
+                    >
+                      {theme.mentions}
+                    </Badge>
+                  </div>
+                );
+              })}
             </div>
           </CardContent>
         </Card>
@@ -264,14 +264,14 @@ export default function InsightsPanel({
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-1.5 md:space-y-2 px-3 sm:px-4">
-           {insights.slice(0, 4).map((insight: string, index) => (
-  <div key={index} className="flex gap-1.5 sm:gap-2">
-    <CheckCircle2 className="h-2.5 w-2.5 sm:h-3 sm:w-3 flex-shrink-0 mt-0.5 text-green-500" />
-    <p className="text-[9px] sm:text-[10px] md:text-xs leading-relaxed">
-      {insight}
-    </p>
-  </div>
-))}
+            {insights.slice(0, 4).map((insight: string, index) => (
+              <div key={index} className="flex gap-1.5 sm:gap-2">
+                <CheckCircle2 className="h-2.5 w-2.5 sm:h-3 sm:w-3 flex-shrink-0 mt-0.5 text-green-500" />
+                <p className="text-[9px] sm:text-[10px] md:text-xs leading-relaxed">
+                  {insight}
+                </p>
+              </div>
+            ))}
           </CardContent>
         </Card>
       )}
