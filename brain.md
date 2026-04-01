@@ -187,3 +187,4 @@ Validated via local runtime checks (TestClient + direct calls):
   - added protected endpoint `GET /api/v1/cache/results` for viewing recent cached analyses.
   - frontend dashboard now includes “Cached Results” loader and open-from-cache action.
   - signup flow now includes confirm-password validation on UI.
+  - backend signup now validates email format (server-side).

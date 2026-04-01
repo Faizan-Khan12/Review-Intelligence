@@ -13,6 +13,7 @@ import os
 import asyncio
 import json
 import traceback
+import re
 from collections import defaultdict
 from io import BytesIO
 from sqlalchemy.orm import Session
@@ -133,7 +134,10 @@ class Config:
     SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "ari_session")
     SESSION_TTL_HOURS = int(os.getenv("SESSION_TTL_HOURS", "24"))
     COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
-    COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax").lower()
+    COOKIE_SAMESITE = os.getenv(
+        "COOKIE_SAMESITE",
+        "none" if ENVIRONMENT == "production" else "lax",
+    ).lower()
 
 config = Config()
 
@@ -992,6 +996,8 @@ async def signup(request: Dict, response: Response, db: Session = Depends(get_db
 
     if not email:
         raise HTTPException(status_code=400, detail="Email is required")
+    if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
+        raise HTTPException(status_code=400, detail="Invalid email format")
     if not password:
         raise HTTPException(status_code=400, detail="Password is required")
     if len(password) < 8:
