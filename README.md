@@ -1,6 +1,6 @@
 # Amazon Review Intelligence Dashboard
 
-AI-powered Amazon review analysis with caching, session auth, and exportable insights.
+AI-powered Amazon review analysis with Redis caching, Supabase-only auth, and exportable insights.
 
 ## Overview
 Amazon Review Intelligence analyzes Amazon product reviews by ASIN (or URL parsed on frontend), then returns:
@@ -17,7 +17,7 @@ Current active runtime:
 - Apify review fetch with mock fallback
 - NLP pipeline (VADER + TextBlob + rule-based enrichment)
 - Redis response caching for analyze endpoint
-- Session-cookie authentication (signup/login/logout/me)
+- Supabase bearer-token authentication for protected APIs
 - Protected expensive endpoints (analyze + export)
 - PostgreSQL/SQLite-ready schema with Alembic migrations
 - Subscription-ready placeholder schema (Razorpay mapping fields)
@@ -27,7 +27,7 @@ Current active runtime:
 - FastAPI
 - SQLAlchemy + Alembic
 - Redis (optional, env-controlled)
-- passlib + bcrypt (session auth)
+- Supabase token validation via GoTrue `/auth/v1/user`
 - pandas/numpy/nltk/textblob/vader
 - Apify client
 
@@ -82,14 +82,17 @@ Important backend vars:
 - `REDIS_URL`
 - `REDIS_TTL_SECONDS`
 - `ENABLE_CACHE`
-- `SESSION_COOKIE_NAME`
-- `SESSION_TTL_HOURS`
-- `COOKIE_SECURE`
+- `SUPABASE_URL`
+- `SUPABASE_ANON_KEY`
+- `SUPABASE_AUTH_TIMEOUT_SECONDS`
+- `SUPABASE_AUTH_CACHE_TTL_SECONDS`
 - `APIFY_API_TOKEN`
 - `ENABLE_AI`
 
 Important frontend vars:
 - `NEXT_PUBLIC_API_URL`
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
 
 ## API Documentation
 ### Public
@@ -102,13 +105,35 @@ Important frontend vars:
 - `POST /api/v1/auth/signup`
 - `POST /api/v1/auth/login`
 - `POST /api/v1/auth/logout`
+- `POST /api/v1/auth/logout-all`
 - `GET /api/v1/auth/me`
+- `GET /api/v1/auth/csrf`
+- `POST /api/v1/auth/verify-email/request`
+- `POST /api/v1/auth/verify-email/confirm`
+- `POST /api/v1/auth/password-reset/request`
+- `POST /api/v1/auth/password-reset/confirm`
+Note: except `/api/v1/auth/me` and `/api/v1/auth/csrf`, these endpoints are deprecated and return `410 Gone`.
 
-### Protected (session required)
+### Admin
+- `GET /api/v1/admin/users`
+- `PATCH /api/v1/admin/users/{id}/role`
+- `GET /api/v1/admin/sessions`
+Note: these local-admin endpoints are deprecated and return `410 Gone`.
+
+### Protected (verified email + auth)
 - `POST /api/v1/analyze`
 - `POST /api/v1/export/csv`
 - `POST /api/v1/export/pdf`
 - `GET /api/v1/cache/results`
+
+Auth behavior on protected routes:
+- If `Authorization: Bearer <token>` is present, backend validates Supabase token.
+- If bearer token is missing/invalid/expired, backend returns `401`.
+
+Legacy auth route behavior:
+- `/api/v1/auth/me` remains available as bearer-token introspection.
+- `/api/v1/auth/csrf` remains as compatibility no-op.
+- Other legacy `/api/v1/auth/*` routes return `410 Gone` and should not be used.
 
 ### Analyze Request Example
 ```json
@@ -128,20 +153,18 @@ Cache key policy:
 
 Notes:
 - shared/global by request parameters (not user-scoped)
-- TTL controlled by `REDIS_TTL_SECONDS`
+- TTL controlled by `REDIS_TTL_SECONDS` (default `172800` = 48 hours)
 
 ## Auth Behavior
-- Cookie-based session auth (`HttpOnly`, `SameSite` configurable via `COOKIE_SAMESITE`)
-- `Secure` cookie forced in production
-- Session records stored server-side in `user_sessions`
-- For cross-domain frontend/backend deployments, set:
-  - `COOKIE_SAMESITE=none`
-  - `COOKIE_SECURE=true`
+- Preferred: Supabase access token in `Authorization: Bearer <jwt>`
+- No cookie-session fallback is used for protected APIs.
+- CSRF tokens are not required in bearer-token mode.
+- Email verification and password reset are handled via Supabase Auth flows.
 
 ## Database & Migrations
 - Alembic config: `backend/alembic.ini`
 - Migration folder: `backend/alembic/versions/`
-- Initial auth/subscription migration exists and is applied in local dev setup
+- Existing SQLAlchemy/Alembic schema is still present for non-auth data and historical compatibility
 
 Run migration manually:
 ```bash
@@ -167,9 +190,13 @@ npm run dev
 ```
 
 ## Deployment
-Current repo includes multiple deployment manifests (`render.yaml`, `backend/Render.yaml`, Docker compose files, Fly config).
+Canonical deployment manifest:
+- `render.yaml` (backend on Render)
+
 For backend runtime command, use:
-- `uvicorn main:app --host 0.0.0.0 --port $PORT`
+- `cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT --workers 2`
+
+Frontend is expected to be deployed on Vercel (set `NEXT_PUBLIC_API_URL` and Supabase public env vars there).
 
 ## Roadmap
 - [ ] Multi-product comparison

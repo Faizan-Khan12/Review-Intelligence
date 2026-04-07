@@ -9,6 +9,7 @@ export interface ProductInfo {
 export interface Review {
   title: string | null;
   text: string | null;
+  rating?: number | null;
   stars: number | null;
   date: string | null;
   verified: boolean | null;
@@ -67,6 +68,7 @@ export interface AnalysisResult {
 export interface CachedAnalysisResult {
   key: string;
   asin: string;
+  product_title?: string | null;
   country: string;
   max_reviews: number;
   enable_ai: boolean;

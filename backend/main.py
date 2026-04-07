@@ -3,20 +3,19 @@ Amazon Review Intelligence - Production Backend
 Real-time Apify Integration with AI/NLP Analysis
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Depends, Response
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from contextlib import asynccontextmanager
 from typing import Dict, List, Any, Optional
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 import os
 import asyncio
-import json
 import traceback
 import re
 from collections import defaultdict
 from io import BytesIO
-from sqlalchemy.orm import Session
 
 # Load environment first
 from dotenv import load_dotenv
@@ -66,15 +65,17 @@ except ImportError as e:
     OPENAI_AVAILABLE = False
     print(f"⚠️ OpenAI service not available: {e}")
 
-# Import auth dependencies
+# Import Supabase auth service
 try:
-    from app.db.session import get_db
-    from app.services.auth_service import auth_service
-    AUTH_AVAILABLE = True
-    print("✅ Auth service loaded")
+    from app.services.supabase_auth_service import supabase_auth_service
+    SUPABASE_AUTH_AVAILABLE = bool(getattr(supabase_auth_service, "enabled", False))
+    if SUPABASE_AUTH_AVAILABLE:
+        print("✅ Supabase auth service enabled")
+    else:
+        print("ℹ️ Supabase auth service disabled (missing env)")
 except ImportError as e:
-    AUTH_AVAILABLE = False
-    print(f"⚠️ Auth service not available: {e}")
+    SUPABASE_AUTH_AVAILABLE = False
+    print(f"⚠️ Supabase auth service not available: {e}")
 
 # Import cache service
 try:
@@ -124,6 +125,7 @@ class Config:
     # Apify
     APIFY_API_TOKEN = os.getenv("APIFY_API_TOKEN", "")
     APIFY_ACTOR_ID = os.getenv("APIFY_ACTOR_ID", "junglee/amazon-reviews-scraper")
+    APIFY_TIMEOUT_SECONDS = int(os.getenv("APIFY_TIMEOUT_SECONDS", "180"))
     
     # Features
     ENABLE_AI = os.getenv("ENABLE_AI", "true").lower() == "true"
@@ -132,12 +134,21 @@ class Config:
 
     # Auth/session
     SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "ari_session")
-    SESSION_TTL_HOURS = int(os.getenv("SESSION_TTL_HOURS", "24"))
+    SESSION_TTL_HOURS = int(os.getenv("SESSION_TTL_HOURS", "720"))
     COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
     COOKIE_SAMESITE = os.getenv(
         "COOKIE_SAMESITE",
         "none" if ENVIRONMENT == "production" else "lax",
     ).lower()
+    CSRF_COOKIE_NAME = os.getenv("CSRF_COOKIE_NAME", "ari_csrf")
+    CSRF_HEADER_NAME = os.getenv("CSRF_HEADER_NAME", "X-CSRF-Token")
+    EMAIL_VERIFY_TOKEN_TTL_MINUTES = int(os.getenv("EMAIL_VERIFY_TOKEN_TTL_MINUTES", "1440"))
+    PASSWORD_RESET_TOKEN_TTL_MINUTES = int(os.getenv("PASSWORD_RESET_TOKEN_TTL_MINUTES", "30"))
+    FRONTEND_APP_URL = os.getenv("FRONTEND_APP_URL", "http://localhost:3000")
+
+    AUTH_RATE_LIMIT_LOGIN_PER_MINUTE = int(os.getenv("AUTH_RATE_LIMIT_LOGIN_PER_MINUTE", "10"))
+    AUTH_RATE_LIMIT_SIGNUP_PER_HOUR = int(os.getenv("AUTH_RATE_LIMIT_SIGNUP_PER_HOUR", "10"))
+    AUTH_RATE_LIMIT_PASSWORD_RESET_PER_HOUR = int(os.getenv("AUTH_RATE_LIMIT_PASSWORD_RESET_PER_HOUR", "5"))
 
 config = Config()
 
@@ -194,6 +205,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Apply basic security headers for browser clients."""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    if config.ENVIRONMENT == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
 # ============= HELPER FUNCTIONS =============
 
 def analyze_sentiment(text: str) -> Dict:
@@ -227,96 +250,287 @@ def analyze_sentiment(text: str) -> Dict:
     }
 
 
+ASIN_PATTERN = re.compile(r"^[A-Z0-9]{10}$")
+ASIN_URL_PATTERNS = [
+    re.compile(r"/dp/([A-Z0-9]{10})(?:[/?]|$)", re.IGNORECASE),
+    re.compile(r"/gp/product/([A-Z0-9]{10})(?:[/?]|$)", re.IGNORECASE),
+    re.compile(r"/product/([A-Z0-9]{10})(?:[/?]|$)", re.IGNORECASE),
+    re.compile(r"/ASIN/([A-Z0-9]{10})(?:[/?]|$)", re.IGNORECASE),
+]
+
+
+def normalize_asin(value: Any) -> Optional[str]:
+    """Normalize ASIN from plain value or Amazon product URL."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+
+    candidate = raw.upper()
+    if ASIN_PATTERN.fullmatch(candidate):
+        return candidate
+
+    for pattern in ASIN_URL_PATTERNS:
+        match = pattern.search(raw)
+        if match and match.group(1):
+            extracted = match.group(1).upper()
+            if ASIN_PATTERN.fullmatch(extracted):
+                return extracted
+
+    return None
+
+
 def build_analysis_cache_key(asin: str, country: str, max_reviews: int, enable_ai: bool) -> str:
     """Build cache key for analysis endpoint response."""
     return f"analysis:{asin}:{country}:{max_reviews}:{int(bool(enable_ai))}"
 
 
-def _cookie_secure_flag() -> bool:
-    """Enable secure cookies in production by default."""
-    if config.ENVIRONMENT == "production":
-        return True
-    return config.COOKIE_SECURE
+@dataclass
+class AuthPrincipal:
+    """Normalized authenticated principal (local session or Supabase token)."""
+
+    id: str
+    email: str
+    role: str = "user"
+    is_active: bool = True
+    email_verified_at: Optional[datetime] = None
+    provider: str = "local"
+    raw: Optional[Dict[str, Any]] = None
 
 
-def _cookie_samesite_value() -> str:
-    """Resolve SameSite policy with production-safe defaults."""
-    configured = (config.COOKIE_SAMESITE or "").lower().strip()
-    if configured in {"lax", "strict", "none"}:
-        return configured
-    return "none" if config.ENVIRONMENT == "production" else "lax"
+def _user_payload(user) -> Dict[str, Any]:
+    """Serialize user for API responses."""
+    user_id = getattr(user, "id", "")
+    if isinstance(user_id, (int, float)):
+        payload_id: Any = int(user_id)
+    else:
+        payload_id = str(user_id)
+    return {
+        "id": payload_id,
+        "email": getattr(user, "email", ""),
+        "role": getattr(user, "role", "user"),
+        "is_active": bool(getattr(user, "is_active", True)),
+        "email_verified": bool(getattr(user, "email_verified_at", None)),
+        "email_verified_at": (
+            getattr(user, "email_verified_at").isoformat()
+            if getattr(user, "email_verified_at", None)
+            else None
+        ),
+    }
 
 
-def _set_session_cookie(response: Response, token: str) -> None:
-    """Set session cookie with consistent security attributes."""
-    max_age = config.SESSION_TTL_HOURS * 3600
-    samesite = _cookie_samesite_value()
-    response.set_cookie(
-        key=config.SESSION_COOKIE_NAME,
-        value=token,
-        max_age=max_age,
-        expires=max_age,
-        path="/",
-        secure=_cookie_secure_flag(),
-        httponly=True,
-        samesite=samesite,
+def _ensure_auth_available() -> None:
+    if not SUPABASE_AUTH_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Supabase auth is not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY.",
+        )
+
+
+def _extract_bearer_token(request: Request) -> str:
+    """Extract bearer token from Authorization header."""
+    header = request.headers.get("authorization", "")
+    if not header:
+        return ""
+    prefix = "bearer "
+    if header.lower().startswith(prefix):
+        return header[len(prefix):].strip()
+    return ""
+
+
+def _principal_from_supabase(request: Request) -> Optional[AuthPrincipal]:
+    """Resolve principal from Supabase bearer token when configured."""
+    if not SUPABASE_AUTH_AVAILABLE:
+        return None
+
+    token = _extract_bearer_token(request)
+    if not token:
+        return None
+
+    principal_data = supabase_auth_service.get_principal_from_token(token)
+    if not principal_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired access token")
+
+    return AuthPrincipal(
+        id=str(principal_data.get("id", "")),
+        email=str(principal_data.get("email", "")),
+        role=str(principal_data.get("role", "user")),
+        is_active=bool(principal_data.get("is_active", True)),
+        email_verified_at=principal_data.get("email_verified_at"),
+        provider="supabase",
+        raw=principal_data.get("raw"),
     )
 
 
-def _clear_session_cookie(response: Response) -> None:
-    """Clear session cookie."""
-    samesite = _cookie_samesite_value()
-    response.delete_cookie(
-        key=config.SESSION_COOKIE_NAME,
-        path="/",
-        secure=_cookie_secure_flag(),
-        httponly=True,
-        samesite=samesite,
+def get_optional_current_user(request: Request):
+    """Resolve current user from Supabase token when present."""
+    return _principal_from_supabase(request)
+
+
+def get_current_user(request: Request):
+    """Resolve current authenticated user from Supabase bearer token."""
+    _ensure_auth_available()
+
+    supabase_principal = _principal_from_supabase(request)
+    if supabase_principal:
+        return supabase_principal
+
+    raise HTTPException(status_code=401, detail="Missing bearer token")
+
+
+def require_verified_user(current_user=Depends(get_current_user)):
+    if not current_user.email_verified_at:
+        raise HTTPException(status_code=403, detail="Email verification required")
+    return current_user
+
+
+def require_admin(current_user=Depends(get_current_user)):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return current_user
+
+
+def require_csrf(request: Request):
+    """No-op in Supabase bearer-token mode."""
+    return
+
+
+def _reject_legacy_auth_route(route_name: str) -> None:
+    """Reject deprecated local-auth routes after Supabase migration."""
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            f"'{route_name}' is deprecated. Use Supabase Auth from the frontend client "
+            "and pass Authorization: Bearer <token> to backend protected APIs."
+        ),
     )
 
+LOW_VALUE_KEYWORDS = {
+    "good", "great", "okay", "ok", "nice", "bad", "best", "better", "worse",
+    "average", "perfect", "excellent", "amazing", "awesome", "fine", "decent",
+    "product", "item", "thing", "stuff", "works", "work", "working", "use",
+    "used", "using", "value", "money", "fast", "slow", "time", "day",
+    "buy", "bought", "purchase", "review", "reviews",
+}
 
-def get_current_user(request: Request, db: Session = Depends(get_db)):
-    """Resolve current authenticated user from session cookie."""
-    if not AUTH_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Auth service unavailable")
+KEYWORD_SIGNAL_WORDS = {
+    "battery", "quality", "sound", "noise", "cancellation", "comfort", "fit",
+    "delivery", "shipping", "packaging", "durability", "price", "performance",
+    "connectivity", "bluetooth", "app", "setup", "microphone", "charging",
+}
 
-    session_token = request.cookies.get(config.SESSION_COOKIE_NAME)
-    if not session_token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+THEME_RULES: Dict[str, List[str]] = {
+    "Sound Quality": ["sound quality", "sound", "audio", "bass", "treble", "volume", "voice clarity"],
+    "Noise Cancellation": ["noise cancellation", "anc", "noise canceling", "background noise"],
+    "Battery Life": ["battery life", "battery", "charging", "charge", "power backup"],
+    "Build Quality": ["build quality", "material", "sturdy", "durable", "construction", "premium feel"],
+    "Comfort & Fit": ["comfort", "comfortable", "fit", "ear tips", "lightweight", "wearing"],
+    "Connectivity": ["connectivity", "bluetooth", "connection", "pairing", "disconnect", "app"],
+    "Delivery & Packaging": ["delivery", "shipping", "arrived", "packaging", "package", "box"],
+    "Value for Money": ["price", "cost", "worth", "value for money", "expensive", "cheap"],
+    "Ease of Use": ["easy to use", "easy setup", "setup", "simple", "user friendly", "intuitive"],
+    "Durability & Reliability": ["durable", "reliable", "lasted", "broke", "stopped working", "defective"],
+}
 
-    user = auth_service.get_user_from_session_token(db, session_token)
-    if not user:
-        raise HTTPException(status_code=401, detail="Session invalid or expired")
-    return user
 
-def extract_keywords(texts: List[str], top_n: int = 10) -> List[Dict]:
-    """Extract keywords from texts"""
-    from collections import Counter
-    import re
-    
-    # Combine all texts
-    combined = " ".join(texts).lower()
-    
-    # Simple tokenization
-    words = re.findall(r'\b[a-z]+\b', combined)
-    
-    # Filter stopwords
+def _get_english_stopwords() -> set:
     try:
         from nltk.corpus import stopwords
-        stop_words = set(stopwords.words('english'))
-    except:
-        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'up', 'about', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'between', 'under', 'again', 'further', 'then', 'once'}
-    
-    words = [w for w in words if w not in stop_words and len(w) > 2]
-    
-    # Count frequencies
-    word_freq = Counter(words)
-    
-    # Return top keywords
-    return [
-        {"word": word, "frequency": freq}
-        for word, freq in word_freq.most_common(top_n)
-    ]
+
+        return set(stopwords.words("english"))
+    except Exception:
+        return {
+            "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of",
+            "with", "by", "from", "up", "about", "into", "through", "during", "before",
+            "after", "above", "below", "between", "under", "again", "further", "then",
+            "once", "this", "that", "these", "those", "very", "really",
+        }
+
+
+def _normalize_token(token: str) -> str:
+    token = token.strip().lower()
+    if len(token) <= 2 or not token.isalpha():
+        return ""
+    if token.endswith("ies") and len(token) > 4:
+        return token[:-3] + "y"
+    if token.endswith("s") and len(token) > 4 and not token.endswith("ss"):
+        return token[:-1]
+    return token
+
+
+def extract_keywords(texts: List[str], top_n: int = 10) -> List[Dict]:
+    """
+    Extract high-signal keywords/phrases from review text.
+    Uses document frequency + phrase bias and removes low-value generic words.
+    """
+    from collections import Counter
+
+    if not texts:
+        return []
+
+    stop_words = _get_english_stopwords()
+    generic_terms = stop_words | LOW_VALUE_KEYWORDS
+    doc_frequency: Counter = Counter()
+    total_frequency: Counter = Counter()
+    min_doc_freq = 2 if len(texts) >= 3 else 1
+
+    for text in texts:
+        raw_tokens = re.findall(r"[a-zA-Z]+", str(text).lower())
+        tokens = [_normalize_token(tok) for tok in raw_tokens]
+        tokens = [tok for tok in tokens if tok and tok not in stop_words]
+        if not tokens:
+            continue
+
+        candidates: List[str] = []
+
+        # Strong unigrams only
+        for tok in tokens:
+            if tok in generic_terms:
+                continue
+            candidates.append(tok)
+
+        # Bigrams provide better semantic value than isolated adjectives.
+        for idx in range(len(tokens) - 1):
+            chunk = tokens[idx : idx + 2]
+            if any(word in stop_words for word in chunk):
+                continue
+            if all(word in generic_terms for word in chunk):
+                continue
+            if chunk[-1] in {"product", "item", "thing"}:
+                continue
+            candidates.append(" ".join(chunk))
+
+        for candidate in candidates:
+            total_frequency[candidate] += 1
+        for candidate in set(candidates):
+            doc_frequency[candidate] += 1
+
+    scored: List[tuple[str, float]] = []
+    for term, doc_count in doc_frequency.items():
+        if doc_count < min_doc_freq:
+            continue
+
+        words = term.split()
+        if len(words) == 1 and term in generic_terms:
+            continue
+
+        phrase_bonus = 2.0 if len(words) == 2 else (3.0 if len(words) >= 3 else 0.0)
+        signal_bonus = 1.5 if any(word in KEYWORD_SIGNAL_WORDS for word in words) else 0.0
+        score = (doc_count * 3.0) + total_frequency[term] + phrase_bonus + signal_bonus
+        scored.append((term, score))
+
+    scored.sort(key=lambda item: (-item[1], -doc_frequency[item[0]], -len(item[0].split()), item[0]))
+
+    selected: List[str] = []
+    for term, _score in scored:
+        # Avoid noisy duplication: if unigram already covered by a selected phrase, skip it.
+        if len(term.split()) == 1:
+            if any(term in phrase.split() for phrase in selected if len(phrase.split()) > 1):
+                continue
+        selected.append(term)
+        if len(selected) >= top_n:
+            break
+
+    return [{"word": term, "frequency": int(doc_frequency[term])} for term in selected]
 
 def generate_mock_reviews(asin: str, count: int = 50) -> Dict:
     """Generate mock reviews as fallback"""
@@ -393,11 +607,221 @@ def generate_mock_reviews(asin: str, count: int = 50) -> Dict:
         "data_source": "mock"
     }
 
-async def fetch_apify_reviews(asin: str, max_reviews: int = 50, country: str = "US") -> Dict:
+
+def _coerce_int(value: Any, default: int = 0) -> int:
+    """Safely coerce heterogeneous values into int."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip().replace(",", "")
+    match = re.search(r"[-+]?\d+(?:\.\d+)?", text)
+    if not match:
+        return default
+    try:
+        return int(float(match.group(0)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    """Safely coerce values into bool."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "verified"}
+    return default
+
+
+def _parse_rating(value: Any, default: float = 0.0) -> float:
+    """Extract a numeric rating from formats like '4.0 out of 5 stars'."""
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    match = re.search(r"[-+]?\d+(?:\.\d+)?", text)
+    if not match:
+        return default
+    try:
+        return float(match.group(0))
+    except (TypeError, ValueError):
+        return default
+
+
+def _read_apify_dataset_items(dataset_client, limit: int) -> List[Dict[str, Any]]:
+    """Collect a bounded number of dataset rows to avoid unbounded memory usage."""
+    items: List[Dict[str, Any]] = []
+    for item in dataset_client.iterate_items():
+        if isinstance(item, dict):
+            items.append(item)
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _extract_product_title_from_item(item: Dict[str, Any]) -> str:
+    """Extract product title only from product-level fields (never review title keys)."""
+    for key in ("productTitle", "productName"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    # `name` is only trusted when the row has clear product-level metadata.
+    product_context = any(
+        item.get(field) is not None
+        for field in (
+            "asin",
+            "brand",
+            "manufacturer",
+            "price",
+            "thumbnailImage",
+            "image",
+            "imageUrl",
+            "averageRating",
+            "totalReviews",
+            "reviewsCount",
+        )
+    )
+    if product_context:
+        value = item.get("name")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    return ""
+
+
+def _extract_product_info(dataset_items: List[Dict[str, Any]], asin: str) -> Dict[str, Any]:
+    """Extract product-level metadata from any row that contains it."""
+    for item in dataset_items:
+        title = _extract_product_title_from_item(item)
+        brand = item.get("brand") or item.get("manufacturer")
+        price = item.get("price")
+        image = item.get("thumbnailImage") or item.get("image") or item.get("imageUrl")
+        avg_rating = item.get("averageRating") or item.get("rating")
+        total_reviews = item.get("totalReviews") or item.get("reviewsCount")
+        item_asin = item.get("asin") or asin
+
+        if any([title, brand, price, image, avg_rating, total_reviews]):
+            return {
+                "title": title or f"Product {asin}",
+                "brand": brand or "",
+                "price": price or "",
+                "image": image or "",
+                "rating": _parse_rating(avg_rating, 0.0),
+                "total_reviews": _coerce_int(total_reviews, 0),
+                "asin": str(item_asin or asin),
+            }
+
+    logger.debug(f"Apify product title missing for ASIN {asin}; using ASIN-based fallback title")
+    return {
+        "title": f"Product {asin}",
+        "brand": "",
+        "price": "",
+        "image": "",
+        "rating": 0.0,
+        "total_reviews": 0,
+        "asin": asin,
+    }
+
+
+def _iter_apify_review_rows(dataset_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Flatten dataset rows into review-like rows.
+    Handles both:
+    - flat rows where each row is one review
+    - rows containing nested `reviews` arrays
+    """
+    rows: List[Dict[str, Any]] = []
+    for item in dataset_items:
+        nested_reviews = item.get("reviews")
+        if isinstance(nested_reviews, list) and nested_reviews:
+            for nested in nested_reviews:
+                if isinstance(nested, dict):
+                    merged = dict(item)
+                    merged.update(nested)
+                    rows.append(merged)
+            continue
+        rows.append(item)
+    return rows
+
+
+def _normalize_apify_review(item: Dict[str, Any], idx: int) -> Optional[Dict[str, Any]]:
+    """Normalize different Apify review schemas into one internal shape."""
+    title = (
+        item.get("reviewTitle")
+        or item.get("title")
+        or item.get("headline")
+        or ""
+    )
+    text = (
+        item.get("reviewDescription")
+        or item.get("reviewText")
+        or item.get("text")
+        or item.get("content")
+        or ""
+    )
+    if not title and not text:
+        return None
+
+    raw_rating = (
+        item.get("reviewRating")
+        or item.get("rating")
+        or item.get("stars")
+        or item.get("score")
+        or item.get("ratingScore")
+        or item.get("ratingValue")
+        or item.get("starRating")
+        or item.get("reviewStars")
+        or item.get("reviewScore")
+    )
+    if isinstance(raw_rating, dict):
+        raw_rating = (
+            raw_rating.get("rating")
+            or raw_rating.get("score")
+            or raw_rating.get("value")
+            or raw_rating.get("overall")
+        )
+
+    rating = _parse_rating(raw_rating, 0.0)
+
+    return {
+        "id": str(item.get("id") or item.get("reviewId") or f"apify_{idx}"),
+        "title": str(title),
+        "text": str(text),
+        "rating": rating,
+        "author": str(
+            item.get("reviewAuthor")
+            or item.get("authorName")
+            or item.get("author")
+            or "Anonymous"
+        ),
+        "date": str(item.get("reviewDate") or item.get("date") or item.get("reviewedAt") or ""),
+        "verified": _coerce_bool(
+            item.get("isVerified")
+            if item.get("isVerified") is not None
+            else item.get("verifiedPurchase", item.get("verified"))
+        ),
+        "helpful_count": _coerce_int(
+            item.get("helpfulCount")
+            if item.get("helpfulCount") is not None
+            else item.get("helpfulVotes", item.get("helpful"))
+        ),
+    }
+
+
+async def fetch_apify_reviews(asin: str, max_reviews: int = 50, country: str = "IN") -> Dict:
     """Fetch real reviews from Apify"""
     if not apify_client:
-        logger.warning("Apify client not initialized, using mock data")
-        return generate_mock_reviews(asin, max_reviews)
+        logger.warning("Apify client not initialized")
+        if config.USE_MOCK_FALLBACK:
+            logger.info("Using mock fallback data")
+            return generate_mock_reviews(asin, max_reviews)
+        return {"success": False, "error": "Apify client is not configured"}
     
     try:
         logger.info(f"📡 Fetching reviews from Apify for ASIN: {asin}")
@@ -423,23 +847,30 @@ async def fetch_apify_reviews(asin: str, max_reviews: int = 50, country: str = "
             "productUrls": [{"url": amazon_url}],
             "maxReviews": max_reviews,
             "sort": "recent",
+            "reviewsSort": "recent",
             "filterByRatings": ["allStars"],
             "scrapeProductDetails": True
         }
         
         # Run the actor
         logger.info(f"🚀 Starting Apify actor: {config.APIFY_ACTOR_ID}")
+        wait_secs = max(30, min(config.APIFY_TIMEOUT_SECONDS, 600))
         run = await asyncio.to_thread(
             apify_client.actor(config.APIFY_ACTOR_ID).call,
             run_input=actor_input,
-            wait_secs=60  # Wait up to 60 seconds
+            wait_secs=wait_secs,
         )
         
         # Get results
         dataset_items = []
         if run.get("defaultDatasetId"):
             dataset_client = apify_client.dataset(run["defaultDatasetId"])
-            dataset_items = list(dataset_client.iterate_items())
+            item_limit = max(200, max_reviews * 5)
+            dataset_items = await asyncio.to_thread(
+                _read_apify_dataset_items,
+                dataset_client,
+                item_limit,
+            )
         
         if not dataset_items:
             logger.warning("No data returned from Apify")
@@ -448,72 +879,50 @@ async def fetch_apify_reviews(asin: str, max_reviews: int = 50, country: str = "
             return {"success": False, "error": "No data from Apify"}
         
         # Process results
-        all_reviews = []
-        product_info = {}
-        
-        for item in dataset_items:
-            # Get product info once
-            if not product_info and "productTitle" in item:
-                product_info = {
-                    "title": item.get("productTitle", ""),
-                    "brand": item.get("brand", ""),
-                    "price": item.get("price", ""),
-                    "image": item.get("thumbnailImage", ""),
-                    "rating": item.get("averageRating", 0),
-                    "total_reviews": item.get("totalReviews", 0),
-                    "asin": item.get("asin", asin)
-                }
-    
-                # ✅ FIX: Each item IS a review!
-            if "reviewTitle" in item or "reviewDescription" in item:
-                try:
-                    rating_str = item.get("reviewRating", "0")
-                    if isinstance(rating_str, str) and "out of" in rating_str:
-                        rating = float(rating_str.split()[0])
-                    else:
-                        rating = float(rating_str) if rating_str else 0
-            
-                    review = {
-                        "id": item.get("id", ""),
-                        "title": item.get("reviewTitle", ""),
-                        "text": item.get("reviewDescription", ""),
-                        "rating": rating,
-                        "author": item.get("reviewAuthor", "Anonymous"),
-                        "date": item.get("reviewDate", ""),
-                        "verified": item.get("isVerified", False),
-                        "helpful_count": item.get("helpfulCount", 0)
-                    }
-            
-                    all_reviews.append(review)
-                    logger.info(f"✅ Review: {review['title'][:40]}...")
-            
-                except Exception as e:
-                    logger.error(f"Error: {e}")
-                    continue
+        product_info = _extract_product_info(dataset_items, asin)
+        review_rows = _iter_apify_review_rows(dataset_items)
+        all_reviews: List[Dict[str, Any]] = []
+
+        for idx, item in enumerate(review_rows):
+            normalized = _normalize_apify_review(item, idx)
+            if not normalized:
+                continue
+            all_reviews.append(normalized)
+            if len(all_reviews) >= max_reviews:
+                break
         
         if not all_reviews:
             logger.warning("No reviews extracted from Apify data")
             if config.USE_MOCK_FALLBACK:
                 return generate_mock_reviews(asin, max_reviews)
+            return {
+                "success": False,
+                "error": "Apify run completed but no review rows were extracted. "
+                         "Verify APIFY_ACTOR_ID and actor input schema.",
+            }
         
         # Calculate statistics
-        ratings = [r['rating'] for r in all_reviews]
+        ratings = [float(r.get("rating", 0) or 0) for r in all_reviews]
+        valid_ratings = [value for value in ratings if value > 0]
+        rating_distribution = {"5": 0, "4": 0, "3": 0, "2": 0, "1": 0}
+        for rating in valid_ratings:
+            bucket = str(max(1, min(5, int(round(rating)))))
+            rating_distribution[bucket] += 1
+        average_rating = (
+            sum(valid_ratings) / len(valid_ratings)
+            if valid_ratings
+            else _parse_rating(product_info.get("rating"), 0.0)
+        )
         
         logger.info(f"✅ Successfully fetched {len(all_reviews)} reviews from Apify")
         
         return {
             "success": True,
             "asin": asin,
-            "reviews": all_reviews[:max_reviews],
+            "reviews": all_reviews,
             "total_reviews": len(all_reviews),
-            "average_rating": sum(ratings) / len(ratings) if ratings else 0,
-            "rating_distribution": {
-                "5": len([r for r in ratings if r >= 4.5]),
-                "4": len([r for r in ratings if 3.5 <= r < 4.5]),
-                "3": len([r for r in ratings if 2.5 <= r < 3.5]),
-                "2": len([r for r in ratings if 1.5 <= r < 2.5]),
-                "1": len([r for r in ratings if r < 1.5])
-            },
+            "average_rating": average_rating,
+            "rating_distribution": rating_distribution,
             "product_info": product_info,
             "data_source": "apify"
         }
@@ -570,103 +979,90 @@ def extract_emotions(texts: List[str]) -> Dict[str, float]:
     
     return emotion_scores
 
-# backend/main.py - REPLACE extract_themes function (around line 467)
 def extract_themes(texts: List[str], sentiment_counts: dict) -> List[Dict[str, Any]]:
     """
-    Extract themes from review texts using sklearn clustering
+    Extract stable, interpretable themes from review texts.
+    Replaces unstable cluster-label naming with canonical theme buckets.
     """
-    try:
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        from sklearn.cluster import KMeans
-        
-        if len(texts) < 5:
-            return simple_theme_extraction(texts)
-        
-        vectorizer = TfidfVectorizer(max_features=50, stop_words='english', ngram_range=(1, 2))
-        tfidf_matrix = vectorizer.fit_transform(texts)
-        
-        n_clusters = min(5, len(texts))
-        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-        kmeans.fit(tfidf_matrix)
-        
-        feature_names = vectorizer.get_feature_names_out()
-        themes = []
-        
-        for cluster_id in range(n_clusters):
-            cluster_center = kmeans.cluster_centers_[cluster_id]
-            top_indices = cluster_center.argsort()[-3:][::-1]
-            theme_words = [feature_names[i] for i in top_indices]
-            theme_name = " ".join(theme_words[:2]).title()
-            
-            mentions = sum(1 for label in kmeans.labels_ if label == cluster_id)
-            
-            # Simple sentiment detection
-            sentiment = "neutral"
-            if "good" in theme_name.lower() or "great" in theme_name.lower():
-                sentiment = "positive"
-            elif "bad" in theme_name.lower() or "poor" in theme_name.lower():
-                sentiment = "negative"
-            
-            themes.append({
-                "theme": theme_name,
-                "mentions": mentions,
-                "sentiment": sentiment
-            })
-        
-        return sorted(themes, key=lambda x: x["mentions"], reverse=True)
-        
-    except Exception as e:
-        logger.warning(f"sklearn clustering failed: {e}, using simple extraction")
+    from collections import Counter, defaultdict
+
+    if not texts:
+        return []
+
+    theme_mentions: Counter = Counter()
+    theme_sentiments = defaultdict(Counter)
+
+    for text in texts:
+        text_value = str(text or "")
+        if not text_value:
+            continue
+        lower_text = text_value.lower()
+
+        compound = vader_analyzer.polarity_scores(text_value).get("compound", 0.0)
+        review_sentiment = "neutral"
+        if compound >= 0.2:
+            review_sentiment = "positive"
+        elif compound <= -0.2:
+            review_sentiment = "negative"
+
+        for theme_name, markers in THEME_RULES.items():
+            if any(re.search(rf"\b{re.escape(marker)}\b", lower_text) for marker in markers):
+                theme_mentions[theme_name] += 1
+                theme_sentiments[theme_name][review_sentiment] += 1
+
+    if not theme_mentions:
         return simple_theme_extraction(texts)
+
+    resolved_themes: List[Dict[str, Any]] = []
+    for theme_name, mentions in theme_mentions.items():
+        votes = theme_sentiments.get(theme_name, {})
+        sentiment = max(("positive", "neutral", "negative"), key=lambda key: votes.get(key, 0))
+        resolved_themes.append(
+            {
+                "theme": theme_name,
+                "mentions": int(mentions),
+                "sentiment": sentiment,
+            }
+        )
+
+    # Keep deterministic business-priority order from THEME_RULES for ties.
+    resolved_themes.sort(key=lambda item: -item["mentions"])
+    return resolved_themes[:5]
 
 
 def simple_theme_extraction(texts: List[str]) -> List[Dict[str, Any]]:
     """
-    Simple theme extraction without sklearn - FIXED
+    Fallback theme extraction derived from high-signal keywords.
     """
-    theme_keywords = {
-        "Quality": ["quality", "build", "material", "durable", "sturdy", "well made"],
-        "Price": ["price", "expensive", "cheap", "value", "worth", "cost"],
-        "Performance": ["performance", "works", "fast", "slow", "efficient", "speed"],
-        "Delivery": ["delivery", "shipping", "arrived", "packaging", "package"],
-        "Design": ["design", "look", "appearance", "style", "color", "beautiful"],
-        "Size": ["size", "fit", "large", "small", "perfect fit"],
-        "Easy to Use": ["easy", "simple", "convenient", "user friendly", "straightforward"],
-    }
-    
-    themes = []
-    
-    for theme_name, keywords in theme_keywords.items():
-        mentions = sum(1 for text in texts if any(kw in text.lower() for kw in keywords))
-        
-        if mentions > 0:
-            # Find theme texts
-            theme_texts = [text for text in texts if any(kw in text.lower() for kw in keywords)]
-            
-            # Simple sentiment
-            positive_words = ['great', 'good', 'excellent', 'amazing', 'love', 'perfect', 'best']
-            negative_words = ['bad', 'poor', 'terrible', 'waste', 'disappointed', 'not good']
-            
-            sentiment_scores = []
-            for text_lower in [t.lower() for t in theme_texts]:
-                pos = sum(1 for w in positive_words if w in text_lower)
-                neg = sum(1 for w in negative_words if w in text_lower)
-                if pos > neg:
-                    sentiment_scores.append('positive')
-                elif neg > pos:
-                    sentiment_scores.append('negative')
-                else:
-                    sentiment_scores.append('neutral')
-            
-            sentiment = max(set(sentiment_scores), key=sentiment_scores.count) if sentiment_scores else "neutral"
-            
-            themes.append({
-                "theme": theme_name,
-                "mentions": mentions,
-                "sentiment": sentiment
-            })
-    
-    return sorted(themes, key=lambda x: x["mentions"], reverse=True)[:5]
+    keyword_candidates = extract_keywords(texts, top_n=8)
+    if not keyword_candidates:
+        return []
+
+    positive_markers = {"excellent", "great", "love", "satisfied", "perfect", "reliable"}
+    negative_markers = {"poor", "bad", "terrible", "disappointed", "broken", "defective"}
+
+    themes: List[Dict[str, Any]] = []
+    for candidate in keyword_candidates[:5]:
+        phrase = str(candidate.get("word", "")).strip()
+        if not phrase:
+            continue
+        lower_phrase = phrase.lower()
+
+        sentiment = "neutral"
+        if any(marker in lower_phrase for marker in positive_markers):
+            sentiment = "positive"
+        elif any(marker in lower_phrase for marker in negative_markers):
+            sentiment = "negative"
+
+        themes.append(
+            {
+                "theme": phrase.title(),
+                "mentions": int(candidate.get("frequency", 0)),
+                "sentiment": sentiment,
+            }
+        )
+
+    return themes[:5]
 
 
 def generate_summaries(reviews: List[Dict], sentiment_counts: Dict[str, int], 
@@ -957,11 +1353,15 @@ async def get_buyer_growth(asin: str, period: str = "week"):
 @app.get("/")
 async def root():
     """Root endpoint"""
+    ai_mode = "openai" if OPENAI_AVAILABLE else ("nlp-only" if config.ENABLE_AI else "disabled")
+    auth_mode = "supabase-only" if SUPABASE_AUTH_AVAILABLE else "disabled"
     return {
         "app": config.APP_NAME,
         "version": config.APP_VERSION,
         "status": "operational",
         "apify": "connected" if apify_client else "not configured",
+        "ai": ai_mode,
+        "auth": auth_mode,
         "endpoints": {
             "health": "/health",
             "docs": "/docs",
@@ -974,116 +1374,100 @@ async def root():
 @app.get("/health")
 async def health():
     """Health check"""
+    ai_mode = "openai" if OPENAI_AVAILABLE else ("nlp-only" if config.ENABLE_AI else "disabled")
+    auth_mode = "supabase-only" if SUPABASE_AUTH_AVAILABLE else "disabled"
+    cache_diagnostics = (
+        cache_service.diagnostics()
+        if hasattr(cache_service, "diagnostics")
+        else {
+            "enabled": bool(getattr(cache_service, "enabled", False)),
+            "backend": "unknown",
+            "last_error": None,
+        }
+    )
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
         "services": {
             "api": "operational",
             "apify": "connected" if apify_client else "not configured",
-            "ai": "enabled" if config.ENABLE_AI else "disabled"
+            "ai": ai_mode,
+            "auth": auth_mode,
+            "cache": "enabled" if bool(getattr(cache_service, "enabled", False)) else "disabled",
+            "cache_backend": cache_diagnostics.get("backend", "unknown"),
+            "cache_last_error": cache_diagnostics.get("last_error"),
         }
     }
 
 
 @app.post("/api/v1/auth/signup")
-async def signup(request: Dict, response: Response, db: Session = Depends(get_db)):
-    """Register user and create session cookie."""
-    if not AUTH_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Auth service unavailable")
-
-    email = str(request.get("email", "")).strip().lower()
-    password = str(request.get("password", ""))
-
-    if not email:
-        raise HTTPException(status_code=400, detail="Email is required")
-    if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
-        raise HTTPException(status_code=400, detail="Invalid email format")
-    if not password:
-        raise HTTPException(status_code=400, detail="Password is required")
-    if len(password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
-
-    try:
-        user = auth_service.create_user(db, email, password)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    session_token = auth_service.create_session(db, user.id, config.SESSION_TTL_HOURS)
-    _set_session_cookie(response, session_token)
-
-    return {
-        "success": True,
-        "message": "Signup successful",
-        "user": {
-            "id": user.id,
-            "email": user.email,
-            "is_active": user.is_active,
-        },
-    }
+async def signup():
+    """Deprecated: signup is handled by Supabase Auth directly."""
+    _reject_legacy_auth_route("POST /api/v1/auth/signup")
 
 
 @app.post("/api/v1/auth/login")
-async def login(request: Dict, response: Response, db: Session = Depends(get_db)):
-    """Authenticate user and create session cookie."""
-    if not AUTH_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Auth service unavailable")
-
-    email = str(request.get("email", "")).strip().lower()
-    password = str(request.get("password", ""))
-
-    if not email or not password:
-        raise HTTPException(status_code=400, detail="Email and password are required")
-
-    user = auth_service.authenticate_user(db, email, password)
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-
-    session_token = auth_service.create_session(db, user.id, config.SESSION_TTL_HOURS)
-    _set_session_cookie(response, session_token)
-
-    return {
-        "success": True,
-        "message": "Login successful",
-        "user": {
-            "id": user.id,
-            "email": user.email,
-            "is_active": user.is_active,
-        },
-    }
+async def login():
+    """Deprecated: login is handled by Supabase Auth directly."""
+    _reject_legacy_auth_route("POST /api/v1/auth/login")
 
 
 @app.post("/api/v1/auth/logout")
-async def logout(request: Request, response: Response, db: Session = Depends(get_db)):
-    """Revoke current session and clear cookie."""
-    if not AUTH_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Auth service unavailable")
+async def logout():
+    """Deprecated: logout is handled by Supabase Auth directly."""
+    _reject_legacy_auth_route("POST /api/v1/auth/logout")
 
-    session_token = request.cookies.get(config.SESSION_COOKIE_NAME)
-    if session_token:
-        auth_service.revoke_session(db, session_token)
 
-    _clear_session_cookie(response)
-    return {"success": True, "message": "Logout successful"}
+@app.post("/api/v1/auth/logout-all")
+async def logout_all():
+    """Deprecated: logout-all is handled by Supabase Auth directly."""
+    _reject_legacy_auth_route("POST /api/v1/auth/logout-all")
+
+
+@app.get("/api/v1/auth/csrf")
+async def csrf():
+    """Compatibility endpoint: CSRF is not used in bearer-token mode."""
+    return {"success": True, "csrf_token": ""}
 
 
 @app.get("/api/v1/auth/me")
 async def me(current_user=Depends(get_current_user)):
-    """Return authenticated user profile from session cookie."""
+    """Return authenticated user profile from bearer token."""
     return {
         "success": True,
-        "user": {
-            "id": current_user.id,
-            "email": current_user.email,
-            "is_active": current_user.is_active,
-        },
+        "user": _user_payload(current_user),
     }
+
+
+@app.post("/api/v1/auth/verify-email/request")
+async def verify_email_request():
+    """Deprecated: email verification requests are handled by Supabase Auth directly."""
+    _reject_legacy_auth_route("POST /api/v1/auth/verify-email/request")
+
+
+@app.post("/api/v1/auth/verify-email/confirm")
+async def verify_email_confirm():
+    """Deprecated: email verification confirmation is handled by Supabase Auth directly."""
+    _reject_legacy_auth_route("POST /api/v1/auth/verify-email/confirm")
+
+
+@app.post("/api/v1/auth/password-reset/request")
+async def password_reset_request():
+    """Deprecated: password reset request is handled by Supabase Auth directly."""
+    _reject_legacy_auth_route("POST /api/v1/auth/password-reset/request")
+
+
+@app.post("/api/v1/auth/password-reset/confirm")
+async def password_reset_confirm():
+    """Deprecated: password reset confirmation is handled by Supabase Auth directly."""
+    _reject_legacy_auth_route("POST /api/v1/auth/password-reset/confirm")
 
 
 @app.get("/api/v1/cache/results")
 async def get_cached_results(
     limit: int = 20,
     include_payload: bool = True,
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(require_verified_user),
 ):
     """Return recent cached analysis entries for inspection/reuse."""
     safe_limit = max(1, min(int(limit), 100))
@@ -1092,22 +1476,26 @@ async def get_cached_results(
         "success": True,
         "count": len(entries),
         "cache_enabled": bool(getattr(cache_service, "enabled", False)),
+        "cache_backend": getattr(cache_service, "backend", "unknown"),
+        "cache_last_error": getattr(cache_service, "last_error", None),
         "results": entries,
     }
 
 
 @app.post("/api/v1/analyze")
-async def analyze_product(request: Dict, _current_user=Depends(get_current_user)):
+async def analyze_product(
+    request: Dict,
+    _current_user=Depends(require_verified_user),
+    _csrf=Depends(require_csrf),
+):
     """Main analysis endpoint - FLAT response structure"""
     try:
-        asin = request.get("asin")
+        asin = normalize_asin(request.get("asin"))
         if not asin:
-            raise HTTPException(status_code=400, detail="ASIN is required")
-
-        asin = str(asin).strip()
+            raise HTTPException(status_code=400, detail="Valid ASIN or Amazon product URL is required")
         max_reviews = min(int(request.get("max_reviews", 50)), config.MAX_REVIEWS)
         enable_ai = request.get("enable_ai", config.ENABLE_AI)
-        country = str(request.get("country", "US")).upper().strip()
+        country = str(request.get("country", "IN")).upper().strip()
 
         logger.info(f"🔍 Analyzing ASIN: {asin}")
 
@@ -1217,7 +1605,11 @@ async def generate_insights(request: Dict):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/export/csv")
-async def export_csv(request: Dict, _current_user=Depends(get_current_user)):
+async def export_csv(
+    request: Dict,
+    _current_user=Depends(require_verified_user),
+    _csrf=Depends(require_csrf),
+):
     """Export analysis to CSV"""
     try:
         if not EXPORTER_AVAILABLE:
@@ -1257,7 +1649,11 @@ async def export_csv(request: Dict, _current_user=Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/export/pdf")
-async def export_pdf(request: Dict, _current_user=Depends(get_current_user)):
+async def export_pdf(
+    request: Dict,
+    _current_user=Depends(require_verified_user),
+    _csrf=Depends(require_csrf),
+):
     """Export analysis to PDF"""
     try:
         if not EXPORTER_AVAILABLE:
@@ -1292,6 +1688,24 @@ async def export_pdf(request: Dict, _current_user=Depends(get_current_user)):
     except Exception as e:
         print(f"PDF export error: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/admin/users")
+async def admin_list_users(_admin=Depends(require_admin)):
+    """Deprecated: local admin user listing is disabled in Supabase-only mode."""
+    _reject_legacy_auth_route("GET /api/v1/admin/users")
+
+
+@app.patch("/api/v1/admin/users/{user_id}/role")
+async def admin_update_user_role(user_id: str, _admin=Depends(require_admin)):
+    """Deprecated: local admin role mutation is disabled in Supabase-only mode."""
+    _reject_legacy_auth_route(f"PATCH /api/v1/admin/users/{user_id}/role")
+
+
+@app.get("/api/v1/admin/sessions")
+async def admin_list_sessions(_admin=Depends(require_admin)):
+    """Deprecated: local admin session listing is disabled in Supabase-only mode."""
+    _reject_legacy_auth_route("GET /api/v1/admin/sessions")
 
 # ============= ERROR HANDLERS =============
 

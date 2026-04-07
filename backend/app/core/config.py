@@ -70,8 +70,14 @@ class Settings:
     
     # ============= REDIS CACHE =============
     REDIS_URL: str = os.getenv("REDIS_URL", "")
-    REDIS_TTL_SECONDS: int = int(os.getenv("REDIS_TTL_SECONDS", "3600"))
+    REDIS_TTL_SECONDS: int = int(os.getenv("REDIS_TTL_SECONDS", "172800"))
     ENABLE_CACHE: bool = os.getenv("ENABLE_CACHE", "false").lower() == "true"
+
+    # ============= SUPABASE AUTH =============
+    SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
+    SUPABASE_ANON_KEY: str = os.getenv("SUPABASE_ANON_KEY", "")
+    SUPABASE_AUTH_TIMEOUT_SECONDS: int = int(os.getenv("SUPABASE_AUTH_TIMEOUT_SECONDS", "5"))
+    SUPABASE_AUTH_CACHE_TTL_SECONDS: int = int(os.getenv("SUPABASE_AUTH_CACHE_TTL_SECONDS", "60"))
     
     # ============= SECURITY =============
     SECRET_KEY: str = os.getenv("SECRET_KEY", "your-super-secret-key-change-this")
@@ -163,6 +169,10 @@ class Settings:
     def has_redis(self) -> bool:
         """Check if Redis is configured"""
         return bool(self.REDIS_URL) and self.ENABLE_CACHE
+
+    def has_supabase_auth(self) -> bool:
+        """Check if Supabase auth is configured."""
+        return bool(self.SUPABASE_URL and self.SUPABASE_ANON_KEY)
     
     def get_data_source_info(self) -> dict:
         """Get data source configuration info"""
@@ -174,7 +184,8 @@ class Settings:
             "ai_enabled": self.ENABLE_AI,
             "emotions_enabled": self.ENABLE_EMOTIONS,
             "database_configured": self.has_database(),
-            "cache_configured": self.has_redis()
+            "cache_configured": self.has_redis(),
+            "supabase_auth_configured": self.has_supabase_auth(),
         }
     
     def validate(self):

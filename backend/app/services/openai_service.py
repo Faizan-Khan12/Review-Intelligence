@@ -1,186 +1,223 @@
 """
 OpenAI Integration Service
-Generates high-quality summaries and insights using GPT models
+Generates summaries and insights from review data.
 """
 
 import os
-from typing import Dict, List, Any, Optional
-from openai import OpenAI
-import json
+import time
+import re
+from typing import Any, Dict, List, Optional
+
+from openai import OpenAI, APIConnectionError, APITimeoutError, APIStatusError, RateLimitError
 
 
 class OpenAIService:
-    """Service for OpenAI GPT-based analysis"""
+    """Service for OpenAI GPT-based analysis."""
 
     def __init__(self):
-        self.api_key = os.getenv("OPENAI_API_KEY", "")
-        self.model = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
+        self.api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
         self.max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "500"))
-        self.temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.7"))
+        self.temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.4"))
+        self.timeout_seconds = float(os.getenv("OPENAI_TIMEOUT_SECONDS", "45"))
+        self.max_retries = int(os.getenv("OPENAI_MAX_RETRIES", "2"))
         self.client = None
 
-        if self.api_key:
-            try:
-                self.client = OpenAI(api_key=self.api_key)
-                print("✅ OpenAI service initialized")
-            except Exception as e:
-                print(f"❌ OpenAI initialization failed: {e}")
-                self.client = None
-        else:
-            print("⚠️ OpenAI API key not configured")
+        if not self.api_key:
+            print("OpenAI API key not configured")
+            return
+
+        try:
+            self.client = OpenAI(api_key=self.api_key)
+            print("OpenAI service initialized")
+        except Exception as exc:
+            print(f"OpenAI initialization failed: {exc}")
+            self.client = None
 
     def is_available(self) -> bool:
-        """Check if OpenAI service is available"""
+        """Return whether OpenAI client is configured."""
         return self.client is not None
+
+    def _chat(self, messages: List[Dict[str, str]], max_tokens: int) -> str:
+        """Run chat completion with small retry logic for transient failures."""
+        if not self.client:
+            return ""
+
+        last_error: Optional[Exception] = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=self.temperature,
+                    timeout=self.timeout_seconds,
+                )
+                content = response.choices[0].message.content
+                return content.strip() if content else ""
+            except (APITimeoutError, APIConnectionError, RateLimitError) as exc:
+                last_error = exc
+                if attempt < self.max_retries:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                break
+            except APIStatusError as exc:
+                last_error = exc
+                # 5xx may be transient; 4xx is usually configuration/model.
+                if getattr(exc, "status_code", 500) >= 500 and attempt < self.max_retries:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                break
+            except Exception as exc:
+                last_error = exc
+                break
+
+        if last_error:
+            print(f"OpenAI request failed: {last_error}")
+        return ""
 
     def generate_summary(
         self,
         reviews: List[Dict[str, Any]],
         product_info: Dict[str, Any],
-        sentiment_dist: Dict[str, int]
+        sentiment_dist: Dict[str, int],
     ) -> str:
-        """Generate comprehensive product summary using GPT"""
-        if not self.is_available():
+        """Generate product summary using GPT, with deterministic fallback."""
+        if not self.is_available() or not reviews:
             return self._fallback_summary(reviews, product_info, sentiment_dist)
 
-        try:
-            # Prepare context
-            product_title = product_info.get('title', 'Product')
-            total_reviews = len(reviews)
-            avg_rating = sum(r.get('rating', 0) for r in reviews) / total_reviews if total_reviews > 0 else 0
+        product_title = product_info.get("title", "Product")
+        total_reviews = len(reviews)
+        avg_rating = sum(float(r.get("rating", 0) or 0) for r in reviews) / total_reviews if total_reviews else 0
 
-            # Sample reviews for context (limit to first 10)
-            sample_reviews = reviews[:10]
-            review_texts = "\n".join([
-                f"- Rating {r.get('rating', 0)}/5: {r.get('text', '')[:100]}..."
-                for r in sample_reviews
-            ])
+        sample_reviews = reviews[:10]
+        review_texts = "\n".join(
+            f"- Rating {float(r.get('rating', 0) or 0):.1f}/5: {self._trim_text(r.get('text', ''))}"
+            for r in sample_reviews
+        )
 
-            # Create prompt
-            prompt = f"""Analyze this Amazon product based on customer reviews and provide a comprehensive, professional summary.
+        prompt = (
+            "Analyze these Amazon reviews and provide a concise executive summary.\n\n"
+            f"Product: {product_title}\n"
+            f"Total Reviews: {total_reviews}\n"
+            f"Average Rating: {avg_rating:.2f}/5\n"
+            f"Sentiment Counts: positive={sentiment_dist.get('positive', 0)}, "
+            f"neutral={sentiment_dist.get('neutral', 0)}, "
+            f"negative={sentiment_dist.get('negative', 0)}\n\n"
+            f"Sample Reviews:\n{review_texts}\n\n"
+            "Write 3-4 sentences covering overall sentiment, key strengths, key concerns, and a buyer recommendation."
+        )
 
-Product: {product_title}
-Total Reviews: {total_reviews}
-Average Rating: {avg_rating:.1f}/5
-Sentiment: {sentiment_dist.get('positive', 0)} positive, {sentiment_dist.get('neutral', 0)} neutral, {sentiment_dist.get('negative', 0)} negative
+        summary = self._chat(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a product analyst writing factual summaries from customer reviews.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=self.max_tokens,
+        )
 
-Sample Reviews:
-{review_texts}
-
-Provide a 3-4 sentence executive summary that covers:
-1. Overall customer satisfaction and product quality
-2. Key strengths mentioned by customers
-3. Common concerns or weaknesses (if any)
-4. Recommendation for potential buyers
-
-Write in a professional, objective tone. Be specific and actionable."""
-
-            # Call OpenAI API
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are a professional product analyst specializing in customer review analysis."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=self.max_tokens,
-                temperature=self.temperature
-            )
-
-            summary = response.choices[0].message.content.strip()
-            print(f"✅ OpenAI summary generated ({len(summary)} chars)")
+        if summary:
             return summary
-
-        except Exception as e:
-            print(f"❌ OpenAI summary generation failed: {e}")
-            return self._fallback_summary(reviews, product_info, sentiment_dist)
+        return self._fallback_summary(reviews, product_info, sentiment_dist)
 
     def generate_insights(
         self,
         reviews: List[Dict[str, Any]],
         sentiment_dist: Dict[str, int],
-        keywords: List[Dict[str, Any]]
+        keywords: List[Dict[str, Any]],
     ) -> List[str]:
-        """Generate actionable insights using GPT"""
-        if not self.is_available():
+        """Generate actionable insights using GPT, with deterministic fallback."""
+        if not self.is_available() or not reviews:
             return self._fallback_insights(reviews, sentiment_dist, keywords)
 
-        try:
-            total = len(reviews)
-            positive_pct = (sentiment_dist.get('positive', 0) / total * 100) if total > 0 else 0
-            negative_pct = (sentiment_dist.get('negative', 0) / total * 100) if total > 0 else 0
+        total = len(reviews)
+        positive_pct = (sentiment_dist.get("positive", 0) / total * 100) if total else 0
+        negative_pct = (sentiment_dist.get("negative", 0) / total * 100) if total else 0
+        top_keywords = [kw.get("word", "") for kw in keywords[:10] if kw.get("word")]
 
-            top_keywords = [kw['word'] for kw in keywords[:10]]
+        prompt = (
+            "Generate exactly 5 short actionable insights from these product reviews.\n\n"
+            f"Total Reviews: {total}\n"
+            f"Positive Sentiment: {positive_pct:.1f}%\n"
+            f"Negative Sentiment: {negative_pct:.1f}%\n"
+            f"Top Keywords: {', '.join(top_keywords) if top_keywords else 'N/A'}\n\n"
+            "Sample review snippets:\n"
+            + "\n".join(f"- {self._trim_text(r.get('text', ''))}" for r in reviews[:6])
+            + "\n\n"
+            "Return a numbered list with 5 items. Keep each item under 140 characters."
+        )
 
-            prompt = f"""Analyze this product's customer feedback and generate 5 key actionable insights.
+        raw = self._chat(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a data analyst giving practical product improvement guidance.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=380,
+        )
 
-Total Reviews: {total}
-Positive Sentiment: {positive_pct:.1f}%
-Negative Sentiment: {negative_pct:.1f}%
-Top Keywords: {', '.join(top_keywords)}
+        insights = self._parse_insight_lines(raw)
+        if insights:
+            return insights[:5]
+        return self._fallback_insights(reviews, sentiment_dist, keywords)
 
-Sample Reviews:
-{chr(10).join([f"- {r.get('text', '')[:80]}..." for r in reviews[:5]])}
+    @staticmethod
+    def _trim_text(text: Any, max_len: int = 140) -> str:
+        value = str(text or "").strip().replace("\n", " ")
+        if len(value) <= max_len:
+            return value
+        return value[: max_len - 3] + "..."
 
-Generate exactly 5 bullet-point insights that:
-1. Highlight the product's main strengths
-2. Identify improvement opportunities
-3. Note customer expectations
-4. Suggest actionable recommendations
-5. Provide competitive positioning insights
+    @staticmethod
+    def _parse_insight_lines(raw: str) -> List[str]:
+        if not raw:
+            return []
 
-Format: Start each insight with an emoji and keep it under 100 characters."""
+        lines: List[str] = []
+        for chunk in raw.split("\n"):
+            line = chunk.strip()
+            if not line:
+                continue
+            line = re.sub(r"^[-*•]\s*", "", line)
+            line = re.sub(r"^\d+[.)]\s*", "", line)
+            line = line.strip()
+            if line:
+                lines.append(line)
 
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are a data analyst providing actionable business insights from customer reviews."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=300,
-                temperature=0.7
-            )
+        # If the model returned a single paragraph, split by sentence boundaries.
+        if len(lines) == 1 and ". " in lines[0]:
+            lines = [part.strip() for part in lines[0].split(". ") if part.strip()]
 
-            insights_text = response.choices[0].message.content.strip()
-            # Split by bullet points or newlines
-            insights = [
-                line.strip()
-                for line in insights_text.split('\n')
-                if line.strip() and (line.strip().startswith('-') or line.strip().startswith('•') or line.strip()[0].isdigit() or self._starts_with_emoji(line.strip()))
-            ]
-
-            # Clean up formatting
-            insights = [
-                insight.lstrip('-•0123456789. ').strip()
-                for insight in insights
-            ][:5]  # Limit to 5
-
-            print(f"✅ OpenAI insights generated ({len(insights)} insights)")
-            return insights if insights else self._fallback_insights(reviews, sentiment_dist, keywords)
-
-        except Exception as e:
-            print(f"❌ OpenAI insights generation failed: {e}")
-            return self._fallback_insights(reviews, sentiment_dist, keywords)
-
-    def _starts_with_emoji(self, text: str) -> bool:
-        """Check if text starts with an emoji"""
-        if not text:
-            return False
-        # Common emoji ranges in Unicode
-        first_char = text[0]
-        return ord(first_char) > 0x1F000
+        # Deduplicate while preserving order.
+        deduped: List[str] = []
+        seen = set()
+        for line in lines:
+            key = line.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(line)
+        return deduped
 
     def _fallback_summary(
         self,
         reviews: List[Dict[str, Any]],
         product_info: Dict[str, Any],
-        sentiment_dist: Dict[str, int]
+        sentiment_dist: Dict[str, int],
     ) -> str:
-        """Fallback summary when OpenAI is unavailable"""
         total = len(reviews)
-        positive = sentiment_dist.get('positive', 0)
-        negative = sentiment_dist.get('negative', 0)
-        positive_pct = (positive / total * 100) if total > 0 else 0
-        avg_rating = sum(r.get('rating', 0) for r in reviews) / total if total > 0 else 0
+        if total == 0:
+            return "No reviews are available yet for summary generation."
+
+        positive = sentiment_dist.get("positive", 0)
+        negative = sentiment_dist.get("negative", 0)
+        positive_pct = (positive / total * 100) if total else 0
+        avg_rating = sum(float(r.get("rating", 0) or 0) for r in reviews) / total if total else 0
 
         if positive_pct >= 75:
             sentiment_desc = "excellent customer satisfaction"
@@ -189,52 +226,52 @@ Format: Start each insight with an emoji and keep it under 100 characters."""
         elif positive_pct >= 40:
             sentiment_desc = "mixed customer feedback"
         else:
-            sentiment_desc = "concerns from customers"
+            sentiment_desc = "notable customer concerns"
 
-        return f"Based on {total} reviews, this product has an average rating of {avg_rating:.1f}/5 stars with {sentiment_desc}. {positive} customers reported positive experiences, while {negative} noted areas for improvement. The feedback suggests {'strong market performance' if positive_pct >= 70 else 'opportunity for product enhancement'}."
+        return (
+            f"Based on {total} reviews, the product averages {avg_rating:.1f}/5 and shows {sentiment_desc}. "
+            f"Positive feedback appears in {positive} reviews, while {negative} reviews highlight weaknesses. "
+            f"Use the top themes and keywords to validate fit before purchase."
+        )
 
     def _fallback_insights(
         self,
         reviews: List[Dict[str, Any]],
         sentiment_dist: Dict[str, int],
-        keywords: List[Dict[str, Any]]
+        keywords: List[Dict[str, Any]],
     ) -> List[str]:
-        """Fallback insights when OpenAI is unavailable"""
-        insights = []
+        insights: List[str] = []
         total = len(reviews)
-        positive_pct = (sentiment_dist.get('positive', 0) / total * 100) if total > 0 else 0
-        negative_pct = (sentiment_dist.get('negative', 0) / total * 100) if total > 0 else 0
+        if total == 0:
+            return ["No review data available yet."]
 
-        # Sentiment-based insights
+        positive_pct = (sentiment_dist.get("positive", 0) / total * 100) if total else 0
+        negative_pct = (sentiment_dist.get("negative", 0) / total * 100) if total else 0
+
         if positive_pct > 70:
-            insights.append(f"⭐ Excellent satisfaction: {positive_pct:.1f}% positive reviews indicate strong product quality")
+            insights.append(f"Strong satisfaction: {positive_pct:.1f}% positive sentiment.")
         elif positive_pct > 50:
-            insights.append(f"✅ Good performance: {positive_pct:.1f}% positive sentiment shows customer acceptance")
+            insights.append(f"Moderate satisfaction: {positive_pct:.1f}% positive sentiment.")
         else:
-            insights.append(f"⚠️ Improvement needed: Only {positive_pct:.1f}% positive sentiment")
+            insights.append(f"Improvement needed: only {positive_pct:.1f}% positive sentiment.")
 
         if negative_pct > 30:
-            insights.append(f"🔍 High negativity: {negative_pct:.1f}% negative reviews require attention")
+            insights.append(f"High dissatisfaction risk: {negative_pct:.1f}% negative sentiment.")
 
-        # Keyword insights
         if keywords:
-            top_words = ", ".join([k['word'] for k in keywords[:3]])
-            insights.append(f"🔤 Key topics: Customers frequently mention {top_words}")
+            top_words = ", ".join(k.get("word", "") for k in keywords[:3] if k.get("word"))
+            if top_words:
+                insights.append(f"Most discussed topics: {top_words}.")
 
-        # Review volume insight
-        if total > 100:
-            insights.append(f"📊 Strong engagement: {total} reviews indicate high market interest")
-        elif total < 20:
-            insights.append(f"📊 Limited feedback: Only {total} reviews - more data needed for full analysis")
+        avg_rating = sum(float(r.get("rating", 0) or 0) for r in reviews) / total if total else 0
+        insights.append(f"Average rating is {avg_rating:.1f}/5 across {total} reviews.")
 
-        # Rating consistency
-        avg_rating = sum(r.get('rating', 0) for r in reviews) / total if total > 0 else 0
-        if avg_rating >= 4.5:
-            insights.append(f"🏆 Premium quality: {avg_rating:.1f}/5 average rating suggests excellent product")
-        elif avg_rating >= 4.0:
-            insights.append(f"👍 Above average: {avg_rating:.1f}/5 rating shows solid performance")
+        if total < 20:
+            insights.append("Low review volume; confidence in trend direction is limited.")
+        elif total > 100:
+            insights.append("Large review volume improves signal reliability.")
 
-        return insights[:5]  # Return top 5
+        return insights[:5]
 
 
 # Singleton instance

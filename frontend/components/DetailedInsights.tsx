@@ -8,7 +8,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Progress } from '@/components/ui/progress';
 import { Separator } from '@/components/ui/separator';
 import {
-  ArrowLeft, Star, TrendingUp, TrendingDown, AlertCircle,
+  ArrowLeft, Star, TrendingUp, AlertCircle,
   CheckCircle2, Sparkles, Download, Share2, Package,
   Calendar, BarChart3, ThumbsUp, ThumbsDown, Minus,
   Twitter, Linkedin, Facebook, Mail
@@ -16,6 +16,7 @@ import {
 import type { AnalysisResult, Review } from '@/types';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
+import { apiClient } from '@/lib/api';
 
 interface DetailedInsightsProps {
   analysis: AnalysisResult;
@@ -27,7 +28,17 @@ export default function DetailedInsights({ analysis, onBack }: DetailedInsightsP
   const { toast } = useToast();
 
   const totalReviews = analysis.total_reviews || 0;
-  const avgRating = analysis.average_rating || 0;
+  const ratings = (analysis.reviews || [])
+    .map((review) => {
+      const primary = review.rating;
+      const fallback = review.stars;
+      const value = typeof primary === 'number' ? primary : (typeof fallback === 'number' ? fallback : 0);
+      return Number.isFinite(value) ? value : 0;
+    })
+    .filter((value) => value > 0);
+  const avgRating = analysis.average_rating > 0
+    ? analysis.average_rating
+    : (ratings.length > 0 ? ratings.reduce((sum, value) => sum + value, 0) / ratings.length : 0);
   const sentimentDist = analysis.sentiment_distribution || { positive: 0, neutral: 0, negative: 0 };
   const total = sentimentDist.positive + sentimentDist.neutral + sentimentDist.negative;
 
@@ -42,9 +53,11 @@ export default function DetailedInsights({ analysis, onBack }: DetailedInsightsP
   const insights = Array.isArray(rawInsights)
     ? rawInsights
     : (rawInsights.insights || []);
-  const summary = Array.isArray(rawInsights)
+  const summaryFromSummaries = analysis.summaries?.overall || '';
+  const summaryFromInsights = Array.isArray(rawInsights)
     ? ''
     : (rawInsights.summary || '');
+  const summary = summaryFromSummaries || summaryFromInsights;
 
   const reviews = analysis.reviews || [];
 
@@ -52,7 +65,7 @@ export default function DetailedInsights({ analysis, onBack }: DetailedInsightsP
     return reviews.filter(review => {
       if (review.sentiment === targetSentiment) return true;
 
-      const rating = review.stars ?? 0;
+      const rating = typeof review.rating === 'number' ? review.rating : (review.stars ?? 0);
 
       if (targetSentiment === 'positive') return rating >= 4;
       if (targetSentiment === 'negative') return rating <= 2;
@@ -129,27 +142,12 @@ ${url}`);
         title: `📥 Exporting ${format.toUpperCase()}`,
         description: 'Preparing your export file...',
       });
-
-      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-
-      // Map format to backend endpoint (csv endpoint generates xlsx)
       const endpoint = format === 'xlsx' ? 'csv' : format;
       const fileExt = format === 'csv' ? 'xlsx' : format;
-
-      const response = await fetch(`${API_URL}/api/v1/export/${endpoint}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ analysis_data: analysis }),
+      const response = await apiClient.post(`/api/v1/export/${endpoint}`, { analysis_data: analysis }, {
+        responseType: 'blob',
       });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => null);
-        throw new Error(errorData?.detail || 'Export failed');
-      }
-
-      const blob = await response.blob();
+      const blob = response.data as Blob;
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
@@ -165,11 +163,18 @@ ${url}`);
       });
     } catch (error: any) {
       console.error('Export error:', error);
-      toast({
-        title: '❌ Export Failed',
-        description: error.message || 'Unable to export file. Please try again.',
-        variant: 'destructive',
-      });
+      let message = error.message || 'Unable to export file. Please try again.';
+      const maybeBlob = error?.response?.data;
+      if (maybeBlob instanceof Blob) {
+        try {
+          const text = await maybeBlob.text();
+          const parsed = JSON.parse(text);
+          message = parsed?.detail || parsed?.error || message;
+        } catch {
+          message = 'Unable to export file. Please try again.';
+        }
+      }
+      toast({ title: '❌ Export Failed', description: message, variant: 'destructive' });
     } finally {
       setIsExporting(false);
     }
@@ -189,7 +194,7 @@ ${url}`);
   );
 
   const renderReviewCard = (review: Review, index: number, bgColor: string) => {
-    const reviewRating = review.stars ?? 0;
+    const reviewRating = typeof review.rating === 'number' ? review.rating : (review.stars ?? 0);
     const reviewAuthor = 'Anonymous';
     const reviewDate = review.date || 'Unknown date';
     const reviewTitle = review.title || 'No title';
@@ -228,7 +233,7 @@ ${url}`);
   };
 
   return (
-    <main className="flex-1 p-3 sm:p-4 md:p-6 lg:p-8 bg-gradient-to-br from-background via-background to-muted/20 overflow-y-auto">
+    <main className="flex-1 overflow-y-auto bg-transparent p-3 sm:p-4 md:p-6 lg:p-8">
       <div className="max-w-[1400px] mx-auto space-y-4 sm:space-y-6">
         {/* Header */}
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-4">
@@ -237,7 +242,7 @@ ${url}`);
               <ArrowLeft className="h-4 w-4 sm:h-5 sm:w-5" />
             </Button>
             <div>
-              <h1 className="text-lg sm:text-xl md:text-2xl lg:text-3xl font-bold">Detailed Analysis</h1>
+              <h1 className="text-lg sm:text-xl md:text-2xl lg:text-3xl font-bold">Detailed Insights</h1>
               <p className="text-xs sm:text-sm text-muted-foreground mt-0.5 sm:mt-1">
                 ASIN: {analysis.asin} • {totalReviews} reviews analyzed
               </p>
@@ -303,11 +308,11 @@ ${url}`);
           </div>
         </div>
 
-        <Separator />
+        <Separator className="bg-border/80" />
 
         {/* Product Info */}
         {analysis.product_info && (
-          <Card className="border-none shadow-xl bg-gradient-to-br from-primary/5 to-background">
+          <Card className="card-hover-lift border bg-card">
             <CardContent className="p-4 sm:p-6">
               <div className="flex items-start gap-4">
                 {analysis.product_info.image_url && (
@@ -341,7 +346,7 @@ ${url}`);
           </Card>
         )}
         {/* Executive Summary */}
-        <Card className="border-none shadow-xl">
+        <Card className="card-hover-lift border">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Sparkles className="h-5 w-5 text-primary" />
@@ -356,7 +361,7 @@ ${url}`);
         </Card>
 
         {/* Sentiment Analysis */}
-        <Card className="border-none shadow-xl">
+        <Card className="card-hover-lift border">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <BarChart3 className="h-5 w-5" />
@@ -365,43 +370,43 @@ ${url}`);
           </CardHeader>
           <CardContent className="space-y-6">
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="p-4 rounded-lg bg-green-500/10 border border-green-500/20">
+              <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-4">
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2">
-                    <ThumbsUp className="h-5 w-5 text-green-600" />
+                    <ThumbsUp className="h-5 w-5 text-emerald-600" />
                     <span className="font-semibold">Positive</span>
                   </div>
-                  <span className="text-2xl font-bold text-green-600">
+                  <span className="text-2xl font-bold text-emerald-600">
                     {positivePercent.toFixed(0)}%
                   </span>
                 </div>
-                <Progress value={positivePercent} className="h-2 bg-green-500/20">
-                  <div className="h-full bg-green-500" style={{ width: `${positivePercent}%` }} />
+                <Progress value={positivePercent} className="h-2 bg-emerald-500/20">
+                  <div className="h-full bg-emerald-600" style={{ width: `${positivePercent}%` }} />
                 </Progress>
                 <p className="text-xs text-muted-foreground mt-2">
                   {sentimentDist.positive} reviews
                 </p>
               </div>
 
-              <div className="p-4 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
+              <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-4">
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2">
-                    <Minus className="h-5 w-5 text-yellow-600" />
+                    <Minus className="h-5 w-5 text-amber-600" />
                     <span className="font-semibold">Neutral</span>
                   </div>
-                  <span className="text-2xl font-bold text-yellow-600">
+                  <span className="text-2xl font-bold text-amber-600">
                     {neutralPercent.toFixed(0)}%
                   </span>
                 </div>
-                <Progress value={neutralPercent} className="h-2 bg-yellow-500/20">
-                  <div className="h-full bg-yellow-500" style={{ width: `${neutralPercent}%` }} />
+                <Progress value={neutralPercent} className="h-2 bg-amber-500/20">
+                  <div className="h-full bg-amber-500" style={{ width: `${neutralPercent}%` }} />
                 </Progress>
                 <p className="text-xs text-muted-foreground mt-2">
                   {sentimentDist.neutral} reviews
                 </p>
               </div>
 
-              <div className="p-4 rounded-lg bg-red-500/10 border border-red-500/20">
+              <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-4">
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2">
                     <ThumbsDown className="h-5 w-5 text-red-600" />
@@ -412,7 +417,7 @@ ${url}`);
                   </span>
                 </div>
                 <Progress value={negativePercent} className="h-2 bg-red-500/20">
-                  <div className="h-full bg-red-500" style={{ width: `${negativePercent}%` }} />
+                  <div className="h-full bg-red-600" style={{ width: `${negativePercent}%` }} />
                 </Progress>
                 <p className="text-xs text-muted-foreground mt-2">
                   {sentimentDist.negative} reviews
@@ -423,7 +428,7 @@ ${url}`);
         </Card>
 
         {/* Key Insights */}
-        <Card className="border-none shadow-xl">
+        <Card className="card-hover-lift border">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <CheckCircle2 className="h-5 w-5 text-green-500" />
@@ -465,7 +470,7 @@ ${url}`);
 
         {/* Keywords */}
         {keywords.length > 0 && (
-          <Card className="border-none shadow-xl">
+          <Card className="card-hover-lift border">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Sparkles className="h-5 w-5 text-primary" />
@@ -496,6 +501,60 @@ ${url}`);
                     </Badge>
                   );
                 })}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {reviews.length > 0 && (
+          <Card className="card-hover-lift border">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <CheckCircle2 className="h-5 w-5 text-primary" />
+                Review Samples
+              </CardTitle>
+              <CardDescription>
+                Representative reviews grouped by sentiment.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <ThumbsUp className="h-4 w-4 text-emerald-600" />
+                  <h3 className="text-sm font-semibold">Positive</h3>
+                  <Badge variant="outline">{positiveReviews.length}</Badge>
+                </div>
+                <div className="grid grid-cols-1 gap-3">
+                  {positiveReviews.slice(0, 2).map((review, index) =>
+                    renderReviewCard(review, index, 'bg-emerald-500/5 border-emerald-500/20')
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <Minus className="h-4 w-4 text-amber-600" />
+                  <h3 className="text-sm font-semibold">Neutral</h3>
+                  <Badge variant="outline">{neutralReviews.length}</Badge>
+                </div>
+                <div className="grid grid-cols-1 gap-3">
+                  {neutralReviews.slice(0, 2).map((review, index) =>
+                    renderReviewCard(review, index, 'bg-amber-500/5 border-amber-500/20')
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <ThumbsDown className="h-4 w-4 text-red-600" />
+                  <h3 className="text-sm font-semibold">Negative</h3>
+                  <Badge variant="outline">{negativeReviews.length}</Badge>
+                </div>
+                <div className="grid grid-cols-1 gap-3">
+                  {negativeReviews.slice(0, 2).map((review, index) =>
+                    renderReviewCard(review, index, 'bg-red-500/5 border-red-500/20')
+                  )}
+                </div>
               </div>
             </CardContent>
           </Card>

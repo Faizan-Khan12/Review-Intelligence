@@ -23,28 +23,53 @@ interface GraphAreaProps {
   aiEnabled?: boolean;
 }
 
-// Premium color palette
+// Executive indigo palette
 const COLORS = {
-  primary: '#8b5cf6',
-  secondary: '#ec4899',
-  success: '#10b981',
-  warning: '#f59e0b',
-  danger: '#ef4444',
-  info: '#3b82f6',
-  positive: '#22c55e',
-  neutral: '#eab308',
-  negative: '#ef4444',
-  purple: '#a855f7',
-  pink: '#ec4899',
-  blue: '#3b82f6',
-  cyan: '#06b6d4',
-  teal: '#14b8a6',
-  orange: '#f97316',
-  gradient1: '#8b5cf6',
-  gradient2: '#ec4899',
+  primary: '#1E3A8A',
+  secondary: '#4F46E5',
+  success: '#16A34A',
+  warning: '#CA8A04',
+  danger: '#DC2626',
+  info: '#2563EB',
+  positive: '#16A34A',
+  neutral: '#CA8A04',
+  negative: '#DC2626',
+  purple: '#9333EA',
+  pink: '#4F46E5',
+  blue: '#2563EB',
+  cyan: '#14B8A6',
+  teal: '#0F766E',
+  orange: '#F59E0B',
+  gradient1: '#1E3A8A',
+  gradient2: '#4F46E5',
 };
 
-const RATING_COLORS = ['#ef4444', '#f97316', '#eab308', '#a3e635', '#22c55e'];
+const RATING_COLORS = ['#DC2626', '#F97316', '#CA8A04', '#65A30D', '#16A34A'];
+
+const LOW_VALUE_TERMS = new Set([
+  'good', 'great', 'okay', 'ok', 'nice', 'bad', 'average', 'excellent', 'amazing',
+  'product', 'item', 'thing', 'value', 'money', 'fast', 'slow', 'works', 'work',
+]);
+
+function isMeaningfulKeyword(term: string): boolean {
+  const normalized = term.trim().toLowerCase();
+  if (!normalized) return false;
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (words.length === 1) {
+    return !LOW_VALUE_TERMS.has(words[0]);
+  }
+  const lowCount = words.filter((word) => LOW_VALUE_TERMS.has(word)).length;
+  return lowCount < words.length;
+}
+
+function isMeaningfulTheme(theme: string): boolean {
+  const normalized = theme.trim().toLowerCase();
+  if (!normalized) return false;
+  if (normalized.includes('money value money')) return false;
+  const words = normalized.split(/\s+/).filter(Boolean);
+  const lowCount = words.filter((word) => LOW_VALUE_TERMS.has(word)).length;
+  return lowCount < words.length;
+}
 
 // Data interfaces
 interface KeywordData {
@@ -171,7 +196,15 @@ const SentimentTrendTooltip = ({ active, payload, label }: any) => {
 
 // Animated Bar Component
 const AnimatedBar = (props: any) => {
-  const { x, y, width, height, fill, ...rest } = props;
+  const {
+    x,
+    y,
+    width,
+    height,
+    fill,
+    dataKey: _dataKey,
+    ...rest
+  } = props;
   const [isHovered, setIsHovered] = useState(false);
 
   return (
@@ -232,29 +265,34 @@ export default function GraphArea({ analysis, isLoading, onViewDetails }: GraphA
       };
     }
 
-    const keywords: KeywordData[] = (analysis.top_keywords || []).slice(0, 15).map(kw => ({
-  word: kw.word,
-  frequency: kw.frequency,
-  sentiment: 'neutral',
-  size: Math.min(kw.frequency * 5, 100)
-}));
-    const themes: ThemeData[] = (analysis.themes || []).map((theme, idx) => {
-  if (typeof theme === 'string') {
-    return {
-      theme: theme,
-      mentions: 0,
-      sentiment: 'neutral',
-      fill: [COLORS.primary, COLORS.secondary, COLORS.info, COLORS.success, COLORS.warning, COLORS.danger][idx % 6]
-    };
-  } else {
-    return {
-      theme: theme.theme || '',
-      mentions: theme.mentions || 0,
-      sentiment: theme.sentiment || 'neutral',
-      fill: [COLORS.primary, COLORS.secondary, COLORS.info, COLORS.success, COLORS.warning, COLORS.danger][idx % 6]
-    };
-  }
-});
+    const keywords: KeywordData[] = (analysis.top_keywords || [])
+      .filter((kw) => isMeaningfulKeyword(String(kw?.word || '')))
+      .slice(0, 15)
+      .map((kw) => ({
+        word: kw.word,
+        frequency: kw.frequency,
+        sentiment: 'neutral',
+        size: Math.min(kw.frequency * 5, 100),
+      }));
+
+    const themes: ThemeData[] = (analysis.themes || [])
+      .map((theme, idx) => {
+        if (typeof theme === 'string') {
+          return {
+            theme: theme,
+            mentions: 0,
+            sentiment: 'neutral',
+            fill: [COLORS.primary, COLORS.secondary, COLORS.info, COLORS.success, COLORS.warning, COLORS.danger][idx % 6],
+          };
+        }
+        return {
+          theme: theme.theme || '',
+          mentions: theme.mentions || 0,
+          sentiment: theme.sentiment || 'neutral',
+          fill: [COLORS.primary, COLORS.secondary, COLORS.info, COLORS.success, COLORS.warning, COLORS.danger][idx % 6],
+        };
+      })
+      .filter((theme) => isMeaningfulTheme(String(theme.theme || '')));
     // Emotions (if available)
     const emotions: EmotionData[] = analysis.emotions ? Object.entries(analysis.emotions).map(([key, value]) => ({
       emotion: key.charAt(0).toUpperCase() + key.slice(1),
@@ -301,7 +339,9 @@ export default function GraphArea({ analysis, isLoading, onViewDetails }: GraphA
       if (raw === 'positive' || raw === 'neutral' || raw === 'negative') {
         return raw;
       }
-      const rating = typeof review?.stars === 'number' ? review.stars : 3;
+      const rating = typeof review?.rating === 'number'
+        ? review.rating
+        : (typeof review?.stars === 'number' ? review.stars : 3);
       if (rating >= 4) return 'positive';
       if (rating <= 2) return 'negative';
       return 'neutral';
@@ -379,7 +419,7 @@ export default function GraphArea({ analysis, isLoading, onViewDetails }: GraphA
   // Loading state
   if (isLoading) {
     return (
-      <main className="flex-1 p-3 sm:p-4 md:p-6 lg:p-8 bg-gradient-to-br from-background via-background to-muted/20">
+      <main className="flex-1 bg-transparent p-3 sm:p-4 md:p-6 lg:p-8">
         <div className="max-w-[1600px] mx-auto space-y-4 sm:space-y-6">
           <div className="flex flex-col items-center justify-center min-h-[50vh] sm:min-h-[60vh] gap-3 sm:gap-4">
             <div className="animate-spin rounded-full h-10 w-10 sm:h-12 sm:w-12 md:h-16 md:w-16 border-b-2 border-primary" />
@@ -398,16 +438,16 @@ export default function GraphArea({ analysis, isLoading, onViewDetails }: GraphA
   // Empty state
   if (!analysis) {
     return (
-      <main className="flex-1 p-3 sm:p-4 md:p-6 lg:p-8 bg-gradient-to-br from-background via-background to-muted/20">
+      <main className="flex-1 bg-transparent p-3 sm:p-4 md:p-6 lg:p-8">
         <div className="max-w-[1600px] mx-auto">
           <div className="flex flex-col items-center justify-center min-h-[50vh] sm:min-h-[60vh] gap-4 sm:gap-6 text-center px-3 sm:px-4">
             <div className="rounded-full bg-muted/50 p-3 sm:p-4 md:p-6">
               <BarChart3 className="h-10 w-10 sm:h-12 sm:w-12 md:h-16 md:w-16 lg:h-20 lg:w-20 text-primary/80" />
             </div>
             <div className="space-y-2 sm:space-y-3 max-w-md">
-              <h2 className="text-lg sm:text-xl md:text-2xl lg:text-3xl font-bold">No Analysis Yet</h2>
+              <h2 className="text-lg sm:text-xl md:text-2xl lg:text-3xl font-bold">Dashboard</h2>
               <p className="text-xs sm:text-sm md:text-base text-muted-foreground">
-                Enter an Amazon ASIN in the sidebar to start analyzing product reviews
+                Start by entering an ASIN or Amazon URL.
               </p>
             </div>
           </div>
@@ -418,22 +458,22 @@ export default function GraphArea({ analysis, isLoading, onViewDetails }: GraphA
 
   // Main render
   return (
-    <main className="flex-1 p-3 sm:p-4 md:p-6 lg:p-8 bg-gradient-to-br from-background via-background to-muted/20 overflow-y-auto">
+    <main className="flex-1 overflow-y-auto bg-transparent p-3 sm:p-4 md:p-6 lg:p-8">
       <div className="max-w-[1600px] mx-auto space-y-4 sm:space-y-6">
         
         {/* Header Stats Grid */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-2 sm:gap-3 md:gap-4">
-          <Card className="relative overflow-hidden border-none shadow-lg bg-gradient-to-br from-blue-500/10 via-background to-background hover:shadow-xl transition-all duration-300">
+          <Card className="card-hover-lift relative overflow-hidden border">
             <CardHeader className="pb-2 md:pb-3 p-2.5 sm:p-3 md:p-4">
               <CardDescription className="text-[9px] sm:text-[10px] md:text-xs font-medium">Total Reviews</CardDescription>
               <CardTitle className="text-lg sm:text-xl md:text-2xl lg:text-3xl xl:text-4xl font-bold">
                 {stats.totalReviews}
               </CardTitle>
             </CardHeader>
-            <MessageSquare className="absolute right-2 bottom-2 sm:right-3 sm:bottom-3 md:right-4 md:bottom-4 h-8 w-8 sm:h-10 sm:w-10 md:h-12 md:w-12 lg:h-16 lg:w-16 text-blue-500/20" />
+            <MessageSquare className="absolute right-2 bottom-2 h-8 w-8 text-primary/20 sm:right-3 sm:bottom-3 sm:h-10 sm:w-10 md:right-4 md:bottom-4 md:h-12 md:w-12 lg:h-16 lg:w-16" />
           </Card>
 
-          <Card className="relative overflow-hidden border-none shadow-lg bg-gradient-to-br from-yellow-500/10 via-background to-background hover:shadow-xl transition-all duration-300">
+          <Card className="card-hover-lift relative overflow-hidden border">
             <CardHeader className="pb-2 md:pb-3 p-2.5 sm:p-3 md:p-4">
               <CardDescription className="text-[9px] sm:text-[10px] md:text-xs font-medium">Average Rating</CardDescription>
               <CardTitle className="text-lg sm:text-xl md:text-2xl lg:text-3xl xl:text-4xl font-bold flex items-center gap-1 sm:gap-2">
@@ -441,27 +481,27 @@ export default function GraphArea({ analysis, isLoading, onViewDetails }: GraphA
                 <Star className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 fill-yellow-500 text-yellow-500" />
               </CardTitle>
             </CardHeader>
-            <Star className="absolute right-2 bottom-2 sm:right-3 sm:bottom-3 md:right-4 md:bottom-4 h-8 w-8 sm:h-10 sm:w-10 md:h-12 md:w-12 lg:h-16 lg:w-16 text-yellow-500/20" />
+            <Star className="absolute right-2 bottom-2 h-8 w-8 text-amber-500/20 sm:right-3 sm:bottom-3 sm:h-10 sm:w-10 md:right-4 md:bottom-4 md:h-12 md:w-12 lg:h-16 lg:w-16" />
           </Card>
 
-          <Card className="relative overflow-hidden border-none shadow-lg bg-gradient-to-br from-green-500/10 via-background to-background hover:shadow-xl transition-all duration-300">
+          <Card className="card-hover-lift relative overflow-hidden border">
             <CardHeader className="pb-2 md:pb-3 p-2.5 sm:p-3 md:p-4">
-              <CardDescription className="text-[9px] sm:text-[10px] md:text-xs font-medium">Positive Sentiment</CardDescription>
+              <CardDescription className="text-[9px] sm:text-[10px] md:text-xs font-medium">Positive %</CardDescription>
               <CardTitle className="text-lg sm:text-xl md:text-2xl lg:text-3xl xl:text-4xl font-bold">
                 {stats.positivePercent.toFixed(0)}%
               </CardTitle>
             </CardHeader>
-            <ThumbsUp className="absolute right-2 bottom-2 sm:right-3 sm:bottom-3 md:right-4 md:bottom-4 h-8 w-8 sm:h-10 sm:w-10 md:h-12 md:w-12 lg:h-16 lg:w-16 text-green-500/20" />
+            <ThumbsUp className="absolute right-2 bottom-2 h-8 w-8 text-emerald-500/20 sm:right-3 sm:bottom-3 sm:h-10 sm:w-10 md:right-4 md:bottom-4 md:h-12 md:w-12 lg:h-16 lg:w-16" />
           </Card>
 
-          <Card className="relative overflow-hidden border-none shadow-lg bg-gradient-to-br from-purple-500/10 via-background to-background hover:shadow-xl transition-all duration-300">
+          <Card className="card-hover-lift relative overflow-hidden border">
             <CardHeader className="pb-2 md:pb-3 p-2.5 sm:p-3 md:p-4">
               <CardDescription className="text-[9px] sm:text-[10px] md:text-xs font-medium">Key Themes</CardDescription>
               <CardTitle className="text-lg sm:text-xl md:text-2xl lg:text-3xl xl:text-4xl font-bold">
                 {themeData.length}
               </CardTitle>
             </CardHeader>
-            <Activity className="absolute right-2 bottom-2 sm:right-3 sm:bottom-3 md:right-4 md:bottom-4 h-8 w-8 sm:h-10 sm:w-10 md:h-12 md:w-12 lg:h-16 lg:w-16 text-purple-500/20" />
+            <Activity className="absolute right-2 bottom-2 h-8 w-8 text-indigo-500/20 sm:right-3 sm:bottom-3 sm:h-10 sm:w-10 md:right-4 md:bottom-4 md:h-12 md:w-12 lg:h-16 lg:w-16" />
           </Card>
         </div>
 
@@ -488,7 +528,7 @@ export default function GraphArea({ analysis, isLoading, onViewDetails }: GraphA
               
               {/* Rating Distribution */}
               {ratingDistData.length > 0 && (
-                <Card className="border-none shadow-lg hover:shadow-xl transition-all duration-300">
+                <Card className="card-hover-lift border">
                   <CardHeader className="p-3 sm:p-4 md:p-6">
                     <CardTitle className="text-xs sm:text-sm md:text-base lg:text-lg flex items-center gap-2">
                       <Star className="h-4 w-4 md:h-5 md:w-5 text-yellow-500 fill-yellow-500" />
@@ -518,7 +558,7 @@ export default function GraphArea({ analysis, isLoading, onViewDetails }: GraphA
 
               {/* Sentiment Pie Chart */}
               {sentimentPieData.length > 0 && (
-                <Card className="border-none shadow-lg hover:shadow-xl transition-all duration-300">
+                <Card className="card-hover-lift border">
                   <CardHeader className="p-3 sm:p-4 md:p-6">
                     <CardTitle className="text-xs sm:text-sm md:text-base lg:text-lg flex items-center gap-2">
                       <Activity className="h-4 w-4 md:h-5 md:w-5 text-primary" />
@@ -536,7 +576,7 @@ export default function GraphArea({ analysis, isLoading, onViewDetails }: GraphA
                           cx="50%"
                           cy="50%"
                           labelLine={false}
-                          label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(0)}%`}
+                          label={false}
                           outerRadius={isMobile ? 70 : isTablet ? 90 : 110}
                           fill="#8884d8"
                           dataKey="value"
@@ -548,13 +588,28 @@ export default function GraphArea({ analysis, isLoading, onViewDetails }: GraphA
                         <Tooltip />
                       </PieChart>
                     </ResponsiveContainer>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      {sentimentPieData.map((item) => {
+                        const total = sentimentPieData.reduce((sum, d) => sum + d.value, 0);
+                        const percent = total > 0 ? (item.value / total) * 100 : 0;
+                        return (
+                          <span
+                            key={item.name}
+                            className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted/30 px-2.5 py-1 text-xs"
+                          >
+                            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: item.fill }} />
+                            {item.name}: {percent.toFixed(0)}%
+                          </span>
+                        );
+                      })}
+                    </div>
                   </CardContent>
                 </Card>
               )}
 
               {/* Keywords */}
               {keywordData.length > 0 && (
-                <Card className="border-none shadow-lg hover:shadow-xl transition-all duration-300 lg:col-span-2">
+                <Card className="card-hover-lift border lg:col-span-2">
                   <CardHeader className="p-3 sm:p-4 md:p-6">
                     <CardTitle className="text-xs sm:text-sm md:text-base lg:text-lg flex items-center gap-2">
                       <Sparkles className="h-4 w-4 md:h-5 md:w-5 text-primary" />
@@ -593,7 +648,7 @@ export default function GraphArea({ analysis, isLoading, onViewDetails }: GraphA
 
               {/* Themes */}
               {themeData.length > 0 && (
-                <Card className="border-none shadow-lg hover:shadow-xl transition-all duration-300 lg:col-span-2">
+                <Card className="card-hover-lift border lg:col-span-2">
                   <CardHeader className="p-3 sm:p-4 md:p-6">
                     <CardTitle className="text-xs sm:text-sm md:text-base lg:text-lg flex items-center gap-2">
                       <BarChart3 className="h-4 w-4 md:h-5 md:w-5 text-primary" />
@@ -634,7 +689,7 @@ export default function GraphArea({ analysis, isLoading, onViewDetails }: GraphA
             <div className="grid grid-cols-1 gap-3 sm:gap-4 md:gap-6">
               {/* Sentiment Trend */}
               {sentimentTrendData.length > 0 && (
-                <Card className="border-0 shadow-lg hover:shadow-xl transition-all bg-card/50 backdrop-blur">
+                <Card className="card-hover-lift border bg-card/90">
                   <CardHeader className="pb-2 md:pb-3 px-3 sm:px-4 md:px-6">
                     <CardTitle className="text-xs sm:text-sm md:text-base font-semibold flex items-center gap-2">
                       <Activity className="h-3 w-3 sm:h-4 sm:w-4 text-primary flex-shrink-0" />
@@ -701,7 +756,7 @@ export default function GraphArea({ analysis, isLoading, onViewDetails }: GraphA
             <div className="grid grid-cols-1 gap-3 sm:gap-4 md:gap-6">
               {/* Emotion Radar */}
               {emotionData.length > 0 && (
-                <Card className="border-none shadow-lg hover:shadow-xl transition-all duration-300">
+                <Card className="card-hover-lift border">
                   <CardHeader className="p-3 sm:p-4 md:p-6">
                     <div className="flex items-start justify-between gap-2 flex-wrap">
                       <div className="flex-1 min-w-0">

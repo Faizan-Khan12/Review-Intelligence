@@ -1,267 +1,147 @@
-# Implementation Plan: Cache + Auth (Subscription-Ready)
+# Implementation Plan: Redis + Supabase Auth Migration
 
-## Goal
-Reduce API costs with Redis caching, add session-based authentication (signup/login/logout), protect expensive endpoints, and prepare DB schema for Razorpay subscriptions in a later phase.
+## Summary
+This document replaces prior implementation notes and is now the canonical plan.
 
-## Progress
-- Step 1: Completed
-- Step 2: Completed
-- Step 3: Completed
-- Step 4: Completed
-- Step 5: Completed
-- Step 6: Completed
-- Step 7: Completed
-- Step 8: Completed
-- Step 9: Completed
-- Step 10: Completed
+Primary outcomes:
+- Use **Supabase Auth** as the source of truth for authentication.
+- Keep existing business APIs (`/api/v1/analyze`, `/api/v1/cache/results`, export endpoints) stable.
+- Keep Redis caching enabled with a **48-hour TTL** (`REDIS_TTL_SECONDS=172800`).
+- Support both local and cloud Redis with the same env contract.
 
-## Step 1: Stabilize Backend App Wiring (Completed)
-1. Confirm single canonical FastAPI app entrypoint.
-2. Align compose/runtime command with actual app module.
-3. Remove or defer startup commands that depend on not-yet-created migrations.
+No user migration is required for this phase (single local account; early-stage project).
 
-Completed changes:
-- Updated `docker-compose.yml` backend command to run `uvicorn main:app` and removed premature `alembic upgrade head`.
-- Fixed script entrypoint in `backend/pyproject.toml` to `ari-server = "main:run_server"`.
-- Added `run_server()` in `backend/main.py` and made `__main__` use it.
+## Current Status (April 6, 2026)
+Completed:
+- Added backend Supabase token verification service (`app/services/supabase_auth_service.py`) with short-lived in-memory token cache.
+- Protected route auth now enforces Supabase bearer-token auth (`Authorization: Bearer <token>`).
+- CSRF checks are disabled for API auth in bearer-token mode.
+- Legacy backend auth/admin session routes are deprecated and now return `410 Gone`.
+- Frontend auth API now supports Supabase signup/login/logout/refresh and sends bearer token to backend.
+- Frontend callback bootstrap now handles:
+  - legacy `verify_token` / `reset_token`
+  - Supabase callback params (`token_hash`, `type`, `access_token`, `refresh_token`)
+- Export API calls now use authenticated `apiClient` so bearer auth works for exports.
+- Redis TTL defaults and env examples aligned to 48h (`REDIS_TTL_SECONDS=172800`).
+- Added backend tests for Supabase auth principal mapping and cache path.
+- Cache service hardened for production debugging:
+  - `REDIS_URL` normalization now auto-adds missing scheme (`redis://`) when omitted.
+  - Redis connection failure now falls back to in-memory TTL cache (same key format) instead of full no-cache mode.
+  - Redis reconnect attempts are throttled (~30s) to avoid repeated connection stalls/log spam.
+  - Health/cache responses now expose `cache_backend` and `cache_last_error`.
+- ASIN input normalization added:
+  - Frontend accepts raw ASIN or full Amazon product URL in both sidebar and quick mobile form.
+  - Backend `/api/v1/analyze` now normalizes/validates ASIN from raw input or product URL and returns `400` for invalid input.
+- Product title visibility added for analysis discovery:
+  - Backend cache listing now returns `product_title` for each cached entry.
+  - Frontend cached cards now display product title prominently with ASIN secondary.
+  - Main analysis screen now displays product title + ASIN header for currently opened analysis.
+- Apify product-name mapping quality improved:
+  - Product title extraction is now strict to product-level fields (`productTitle`, `productName`, guarded `name`).
+  - Generic `title` keys are excluded from product naming to avoid review titles being treated as product name.
+  - Fallback title remains `Product {asin}` when product-level title metadata is absent.
+- Summary/rating quality fixes:
+  - Frontend detailed and side summary views now use backend `summaries.overall` as primary source.
+  - Frontend review rating usage now matches backend (`rating`, with `stars` fallback for compatibility).
+  - Backend Apify rating parsing expanded to additional key variants and nested objects.
+  - Backend average rating now uses only valid review ratings (>0), with product-level rating fallback when needed.
+- Supabase password reset callback handling now supports both delivery formats:
+  - `token_hash` recovery links.
+  - Recovery session links (`type=recovery` + `access_token`) without `token_hash`.
+- Dashboard reset form rendering now prioritizes recovery flow even when Supabase callback also produces an authenticated session.
+- Backend email fallback logging was hardened to avoid body/link leakage when SMTP is not configured.
+- Repository cleanup completed:
+  - Removed stale docs (`brain.md`, `CI-CD-SETUP.md`, `DEPLOYMENT.md`, `OPENAI-SETUP.md`, `PROPERTY-SYNC-CHECKLIST.md`).
+  - Kept canonical docs set (`README.md`, `AGENTS.md`, `implementation.md`).
+  - Removed duplicate legacy workflow (`.github/workflows/ci-cd.yml`), keeping `.github/workflows/ci.yml`.
+- Legacy local-auth cleanup completed:
+  - Removed unused local-auth services (`auth_service.py`, `email_service.py`, `rate_limiter.py`).
+  - Removed unused local-auth ORM models (`user_session.py`, `email_verification_token.py`, `password_reset_token.py`) and their old test file.
+  - `app/services/__init__.py` and `app/models/__init__.py` now export only active runtime modules/entities.
+- Deployment/config cleanup completed:
+  - Kept `render.yaml` as canonical deployment manifest.
+  - Removed stale deployment artifacts (`.dockerignore`, `Dockerfile`, `docker-compose.yml`, `docker-compose.prod.yml`, `backend/Render.yaml`, `backend/fly.toml`).
 
-## Step 2: Add Core Dependencies (Completed)
-1. Add backend dependencies for:
-   - SQLAlchemy
-   - Alembic
-   - psycopg2-binary
-   - redis (python client)
-   - passlib[bcrypt]
-2. Keep versions compatible with current FastAPI/Pydantic stack.
+## Goals
+- Migrate from custom backend session-cookie auth to bearer-token auth backed by Supabase Auth.
+- Preserve response payload shapes used by frontend analytics and exports.
+- Maintain graceful behavior when Redis is unavailable (fallback to in-memory cache mode).
+- Keep India (`IN`) as default analysis region.
 
-Completed changes:
-- Added dependency entries in `backend/requirements.txt` for `SQLAlchemy`, `alembic`, `psycopg2-binary`, `redis`, and `passlib[bcrypt]`.
-- Added/updated version-bounded dependency entries in `backend/pyproject.toml` for:
-  - `SQLAlchemy>=2.0.0,<3.0.0`
-  - `alembic>=1.14.0,<2.0.0`
-  - `psycopg2-binary>=2.9.0,<3.0.0`
-  - `redis>=5.2.0,<6.0.0`
-  - `passlib[bcrypt]>=1.7.4,<2.0.0`
+Status note:
+- Graceful behavior was upgraded from **no-cache fallback** to **memory-cache fallback** for better cost control when cloud Redis is temporarily unreachable.
 
-## Step 3: Set Up Database + Migration Baseline (Completed)
-1. Create SQLAlchemy engine/session setup.
-2. Create initial models:
-   - users
-   - user_sessions
-   - subscriptions (placeholder for Razorpay)
-3. Initialize Alembic and create first migration.
-4. Apply migration in local/dev environment.
+## Redis Plan (Local + Cloud)
+### Runtime Contract
+- `ENABLE_CACHE=true`
+- `REDIS_URL=<redis-url>`
+- `REDIS_TTL_SECONDS=172800`
 
-Completed changes:
-- Initialized Alembic in `backend/alembic/` with config file `backend/alembic.ini`.
-- Added DB foundation:
-  - `backend/app/db/base.py`
-  - `backend/app/db/session.py`
-  - `backend/app/db/__init__.py`
-- Added models:
-  - `backend/app/models/user.py`
-  - `backend/app/models/user_session.py`
-  - `backend/app/models/subscription.py`
-  - `backend/app/models/__init__.py`
-- Wired Alembic metadata + DB URL environment support in `backend/alembic/env.py`.
-- Created initial migration:
-  - `backend/alembic/versions/775759117711_create_auth_and_subscription_tables.py`
-- Applied migration locally with:
-  - `cd backend && ./venv/bin/alembic upgrade head`
-  - Resulting local dev DB file: `backend/dev.db` (tables: `users`, `user_sessions`, `subscriptions`).
+### Local
+- Run Redis locally and use `REDIS_URL=redis://localhost:6379/0`.
+- Verify cache hit/miss on repeated analyze requests.
 
-## Step 4: Implement Redis Cache Service (Completed)
-1. Create cache utility module with:
-   - get(key)
-   - set(key, value, ttl)
-   - delete(key)
-2. Wire configuration from env:
-   - ENABLE_CACHE
-   - REDIS_URL
-   - REDIS_TTL_SECONDS
-3. Add safe fallback behavior if Redis is unavailable.
+### Cloud
+- Prefer Supabase Redis add-on **if available** in target environment.
+- If unavailable, use Upstash (or equivalent) with the same `REDIS_URL` variable.
+- No code changes should be required when switching providers.
+- Important: use the **TCP Redis URL** (`rediss://...`) and not the REST URL/token pair.
 
-Completed changes:
-- Added cache service module:
-  - `backend/app/services/cache_service.py`
-  - Includes `RedisCacheService` with `get`, `set`, `delete`.
-- Wired cache service to existing config settings:
-  - `ENABLE_CACHE`
-  - `REDIS_URL`
-  - `REDIS_TTL_SECONDS`
-- Added graceful fallback behavior:
-  - Returns `None` / `False` on Redis unavailable or disabled mode instead of raising runtime errors.
-- Exported cache service from:
-  - `backend/app/services/__init__.py`
+## Supabase Auth Migration Plan
+### Frontend
+- Replace custom auth flows with Supabase SDK auth flows (signup/login/logout/reset/verify).
+- Send Supabase access token in `Authorization: Bearer <jwt>` for protected backend calls.
+- Remove dependency on CSRF for API auth once backend is fully bearer-token based.
 
-## Step 5: Add Analyze Response Caching (Completed)
-1. Build cache key:
-   - `analysis:{asin}:{country}:{max_reviews}:{enable_ai}`
-2. In `/api/v1/analyze`:
-   - Check cache before Apify call.
-   - On hit, return cached response.
-   - On miss, run existing flow and cache successful result.
-3. Keep response shape unchanged for frontend compatibility.
+### Backend
+- Add auth dependency to validate Supabase JWT for protected routes.
+- Replace session-cookie auth checks on protected APIs with bearer-token checks.
+- Keep authorization gates (verified email/role) based on Supabase claims or metadata.
 
-Completed changes:
-- Added cache integration in `backend/main.py`:
-  - Cache key helper: `build_analysis_cache_key(asin, country, max_reviews, enable_ai)`.
-  - Read-through cache lookup before external fetch in `/api/v1/analyze`.
-  - Cache-hit path returns cached payload directly.
-  - Cache-miss path performs normal fetch/analysis and caches successful response.
-- Implemented approved key format:
+### Transition
+- Legacy local auth endpoints are now explicitly deprecated (HTTP `410`).
+- Supabase bearer token is the only supported auth mechanism for protected API access.
+
+## API/Interface Compatibility
+- Keep analyze/cache/export response schemas unchanged.
+- Keep `from_cache` behavior unchanged.
+- Keep cache key format unchanged:
   - `analysis:{asin}:{country}:{max_reviews}:{enable_ai}`
-  - `enable_ai` normalized to `0/1` in the key.
-- Kept response payload structure unchanged for frontend compatibility.
-- Added safe no-op fallback in `main.py` if cache service import is unavailable.
 
-## Step 6: Implement Session-Cookie Auth (Completed)
-1. Create auth data/service layer:
-   - password hashing + verify
-   - session token generation
-   - hashed session token storage
-2. Add endpoints:
-   - `POST /api/v1/auth/signup`
-   - `POST /api/v1/auth/login`
-   - `POST /api/v1/auth/logout`
-   - `GET /api/v1/auth/me`
-3. Set cookie attributes:
-   - HttpOnly
-   - SameSite=Lax
-   - Secure in production
-   - TTL from env
+## Test Plan
+1. Auth validation:
+- Valid Supabase token -> protected endpoints succeed.
+- Missing/invalid/expired token -> deterministic 401/403.
 
-Completed changes:
-- Added security utilities in `backend/app/core/security.py`:
-  - password hash/verify
-  - session token generation
-  - session token hashing
-- Added auth service layer in `backend/app/services/auth_service.py`:
-  - create user
-  - authenticate user
-  - create/revoke session
-  - resolve user from session token
-- Added auth endpoints in `backend/main.py`:
-  - `POST /api/v1/auth/signup`
-  - `POST /api/v1/auth/login`
-  - `POST /api/v1/auth/logout`
-  - `GET /api/v1/auth/me`
-- Added session cookie helpers in `backend/main.py` with:
-  - `HttpOnly`
-  - `SameSite=lax`
-  - `Secure=True` automatically in production
-  - TTL from `SESSION_TTL_HOURS`
-- Added session config values in `backend/main.py`:
-  - `SESSION_COOKIE_NAME`
-  - `SESSION_TTL_HOURS`
-  - `COOKIE_SECURE`
-- Ensured bcrypt compatibility for passlib in dependencies:
-  - `backend/requirements.txt` -> `bcrypt<4`
-  - `backend/pyproject.toml` -> `bcrypt>=3.2.0,<4.0.0`
-- Local runtime validation performed with FastAPI `TestClient`:
-  - signup -> me -> logout -> me(401) -> login -> me
+2. Cache validation:
+- First analyze request -> `from_cache=false`.
+- Repeated identical request -> `from_cache=true`.
+- `/api/v1/cache/results` returns cached entry and `cache_enabled=true`.
+- Verify `cache_backend` is:
+  - `redis` when cloud Redis is connected
+  - `memory` when Redis is unavailable (temporary fallback)
 
-## Step 7: Protect Expensive Endpoints
-1. Add auth dependency/middleware to resolve current user from session cookie.
-2. Protect:
-   - `POST /api/v1/analyze`
-   - `/api/v1/export/*`
-3. Keep `/` and `/health` public.
+3. TTL validation:
+- Use short TTL in test env; verify hit before expiry, miss after expiry.
 
-Completed changes:
-- Added `get_current_user(...)` dependency in `backend/main.py` to centralize cookie session auth checks.
-- Protected routes with `Depends(get_current_user)`:
-  - `POST /api/v1/analyze`
-  - `POST /api/v1/export/csv`
-  - `POST /api/v1/export/pdf`
-- Refactored `GET /api/v1/auth/me` to reuse the same dependency.
-- Verified behavior via local TestClient:
-  - Unauthenticated analyze/export => `401`
-  - Authenticated analyze/export => success responses
+4. Failure-mode validation:
+- Redis unavailable -> app still responds with memory-cache fallback mode.
 
-## Step 8: Add Subscription-Ready Placeholders
-1. Add `subscriptions` table fields for Razorpay mapping:
-   - provider
-   - provider_customer_id
-   - provider_subscription_id
-   - plan_code
-   - status
-   - current_period_end
-2. No payment checkout/webhook logic in this phase.
+5. Regression checks:
+- Frontend type-check passes.
+- Backend tests pass.
+- Frontend dashboards render unchanged payloads.
 
-Completed changes:
-- Subscription placeholder schema was already implemented in Step 3 migration and model:
-  - `backend/app/models/subscription.py`
-  - `backend/alembic/versions/775759117711_create_auth_and_subscription_tables.py`
-- Placeholder subscription creation on signup was already implemented in Step 6:
-  - `backend/app/services/auth_service.py` (`create_user` inserts default subscription row)
-- Validation run confirmed:
-  - required Razorpay-ready columns exist in `subscriptions` table
-  - new user signup creates a placeholder subscription (`provider=razorpay`, `status=inactive`)
+## Rollout Steps
+1. Finalize env vars and verify Redis behavior locally.
+2. Implement Supabase auth in frontend.
+3. Implement Supabase JWT verification in backend and switch protected routes.
+4. Validate end-to-end auth + analyze + cache flows.
+5. Remove legacy auth internals after confidence checks.
+6. Update supporting docs (`AGENTS.md`, README auth/caching sections).
 
-## Step 9: Update Environment + Docs
-1. Add/confirm env vars in `.env.example`:
-   - DATABASE_URL
-   - ENABLE_CACHE
-   - REDIS_URL
-   - REDIS_TTL_SECONDS
-   - SESSION_COOKIE_NAME
-   - SESSION_TTL_HOURS
-   - COOKIE_SECURE
-2. Update README with:
-   - auth endpoints
-   - protected routes
-   - caching behavior and key policy
-
-Completed changes:
-- Updated backend env template in `backend/.env.example` with explicit values for:
-  - `DATABASE_URL`
-  - `ENABLE_CACHE`
-  - `REDIS_URL`
-  - `REDIS_TTL_SECONDS`
-  - `SESSION_COOKIE_NAME`
-  - `SESSION_TTL_HOURS`
-  - `COOKIE_SECURE`
-- Updated root env template in `.env.example` with matching DB/cache/session variables.
-- Updated docs in `ReadME.md`:
-  - Corrected backend runtime command to `uvicorn main:app`.
-  - Replaced outdated API paths with current runtime endpoints.
-  - Added auth endpoint documentation.
-  - Marked protected endpoints (`/api/v1/analyze`, `/api/v1/export/*`).
-  - Added Redis caching behavior and key policy documentation.
-  - Updated roadmap item for authentication system to completed.
-
-## Step 10: Validation & Testing
-1. Cache tests:
-   - first call miss, second call hit
-   - ttl expiry behavior
-2. Auth tests:
-   - signup/login/logout/me
-   - invalid/expired session handling
-3. Authorization tests:
-   - unauthenticated analyze/export returns 401
-   - authenticated succeeds
-4. Regression:
-   - verify existing frontend analysis flow still works unchanged.
-
-Completed changes:
-- Executed consolidated backend validation (FastAPI `TestClient`) covering:
-  - auth flow: signup -> me -> logout -> me(401) -> login
-  - authorization: unauthenticated analyze/export return `401`
-  - cache behavior: first analyze call miss, second hit, TTL expiry triggers fresh fetch
-  - response regression: required analysis response keys are present
-- Added export robustness fix in `backend/app/services/exporter.py`:
-  - handle `sentiment_distribution=None` safely in PDF export path
-  - guard division with `max(total_reviews, 1)` to avoid zero-division
-- Validated authenticated export endpoints:
-  - `/api/v1/export/csv` -> `200`
-  - `/api/v1/export/pdf` -> `200`
-
----
-
-## Execution Order
-1. Step 1-3 (foundation)
-2. Step 4-5 (cost reduction via cache)
-3. Step 6-7 (auth + protection)
-4. Step 8 (subscription-ready schema)
-5. Step 9-10 (docs + tests)
+## Assumptions
+- Supabase Auth migration is mandatory in this phase.
+- Supabase Redis availability is environment-dependent; fallback provider is acceptable.
+- Default cache TTL remains 48 hours unless explicitly changed.
+- Default analysis region remains India (`IN`).

@@ -30,9 +30,9 @@ export default function InsightsPanel({
       <aside className={cn(
         "w-full",
         "p-3 sm:p-4 md:p-6 space-y-3 md:space-y-4",
-        "bg-background lg:h-full overflow-y-auto"
+        "bg-card/60 lg:h-full overflow-y-auto"
       )}>
-        <Card className="border-0 shadow-sm animate-pulse">
+        <Card className="animate-pulse border">
           <CardHeader className="pb-2 md:pb-3">
             <div className="h-4 bg-muted rounded w-24" />
           </CardHeader>
@@ -51,9 +51,9 @@ export default function InsightsPanel({
       <aside className={cn(
         "w-full",
         "p-3 sm:p-4 md:p-6 space-y-3 md:space-y-4",
-        "bg-background lg:h-full"
+        "bg-card/60 lg:h-full"
       )}>
-        <Card className="border-0 bg-muted/50">
+        <Card className="border bg-muted/50">
           <CardContent className="p-4 sm:p-6 text-center">
             <Sparkles className="h-8 w-8 sm:h-10 sm:w-10 mx-auto mb-3 text-muted-foreground/50" />
             <p className="text-xs sm:text-sm text-muted-foreground">
@@ -67,12 +67,24 @@ export default function InsightsPanel({
 
   // Extract data with safe defaults
   const totalReviews = analysis.total_reviews || 0;
-  const averageRating = analysis.average_rating || 0;
+  const ratings = (analysis.reviews || [])
+    .map((review) => {
+      const primary = review.rating;
+      const fallback = review.stars;
+      const value = typeof primary === 'number' ? primary : (typeof fallback === 'number' ? fallback : 0);
+      return Number.isFinite(value) ? value : 0;
+    })
+    .filter((value) => value > 0);
+  const averageRating = analysis.average_rating > 0
+    ? analysis.average_rating
+    : (ratings.length > 0 ? ratings.reduce((sum, value) => sum + value, 0) / ratings.length : 0);
   const sentimentDist = analysis.sentiment_distribution || { positive: 0, neutral: 0, negative: 0 };
   const themes = analysis.themes || [];
   const keywords = analysis.top_keywords || [];
   const insights: string[] = Array.isArray(analysis.insights) ? analysis.insights as string[] : (analysis.insights?.insights as string[] || []);
-  const summary = Array.isArray(analysis.insights) ? 'Analysis complete' : (analysis.insights?.summary || 'Analysis complete');
+  const summary = analysis.summaries?.overall
+    || (Array.isArray(analysis.insights) ? '' : (analysis.insights?.summary || ''))
+    || 'Analysis complete';
 
   // Calculate percentages
   const total = sentimentDist.positive + sentimentDist.neutral + sentimentDist.negative;
@@ -84,11 +96,11 @@ export default function InsightsPanel({
     <aside className={cn(
       "w-full",
       "p-3 sm:p-4 md:p-6 space-y-3 md:space-y-4",
-      "bg-background lg:h-full overflow-y-auto"
+      "bg-card/60 lg:h-full overflow-y-auto"
     )}>
 
       {/* Summary Card - Mobile Optimized */}
-      <Card className="border-0 shadow-sm">
+      <Card className="card-hover-lift border">
         <CardHeader className="pb-2 md:pb-3 px-3 sm:px-4">
           <CardTitle className="text-xs sm:text-sm md:text-base font-semibold flex items-center gap-2">
             <Sparkles className="h-3 w-3 sm:h-4 sm:w-4 text-primary flex-shrink-0" />
@@ -126,7 +138,7 @@ export default function InsightsPanel({
       </Card>
 
       {/* Sentiment Breakdown - Mobile Optimized */}
-      <Card className="border-0 shadow-sm">
+      <Card className="card-hover-lift border">
         <CardHeader className="pb-2 md:pb-3 px-3 sm:px-4">
           <CardTitle className="text-xs sm:text-sm md:text-base font-semibold">
             Sentiment Breakdown
@@ -137,13 +149,13 @@ export default function InsightsPanel({
           <div className="space-y-1">
             <div className="flex items-center justify-between">
               <span className="text-[10px] sm:text-xs md:text-sm">Positive</span>
-              <span className="text-[10px] sm:text-xs md:text-sm font-semibold text-green-600">
+              <span className="text-[10px] sm:text-xs md:text-sm font-semibold status-positive">
                 {positivePercent.toFixed(0)}%
               </span>
             </div>
             <Progress value={positivePercent} className="h-1 sm:h-1.5 bg-muted">
               <div
-                className="h-full bg-green-500 rounded-full transition-all"
+                className="h-full rounded-full bg-emerald-600 transition-all"
                 style={{ width: `${positivePercent}%` }}
               />
             </Progress>
@@ -153,13 +165,13 @@ export default function InsightsPanel({
           <div className="space-y-1">
             <div className="flex items-center justify-between">
               <span className="text-[10px] sm:text-xs md:text-sm">Neutral</span>
-              <span className="text-[10px] sm:text-xs md:text-sm font-semibold text-yellow-600">
+              <span className="text-[10px] sm:text-xs md:text-sm font-semibold status-neutral">
                 {neutralPercent.toFixed(0)}%
               </span>
             </div>
             <Progress value={neutralPercent} className="h-1 sm:h-1.5 bg-muted">
               <div
-                className="h-full bg-yellow-500 rounded-full transition-all"
+                className="h-full rounded-full bg-amber-500 transition-all"
                 style={{ width: `${neutralPercent}%` }}
               />
             </Progress>
@@ -169,13 +181,13 @@ export default function InsightsPanel({
           <div className="space-y-1">
             <div className="flex items-center justify-between">
               <span className="text-[10px] sm:text-xs md:text-sm">Negative</span>
-              <span className="text-[10px] sm:text-xs md:text-sm font-semibold text-red-600">
+              <span className="text-[10px] sm:text-xs md:text-sm font-semibold status-negative">
                 {negativePercent.toFixed(0)}%
               </span>
             </div>
             <Progress value={negativePercent} className="h-1 sm:h-1.5 bg-muted">
               <div
-                className="h-full bg-red-500 rounded-full transition-all"
+                className="h-full rounded-full bg-red-600 transition-all"
                 style={{ width: `${negativePercent}%` }}
               />
             </Progress>
@@ -185,7 +197,7 @@ export default function InsightsPanel({
 
       {/* Themes - Mobile Optimized */}
       {themes.length > 0 && (
-        <Card className="border-0 shadow-sm">
+        <Card className="card-hover-lift border">
           <CardHeader className="pb-2 md:pb-3 px-3 sm:px-4">
             <CardTitle className="text-xs sm:text-sm md:text-base font-semibold">
               Key Themes
@@ -232,7 +244,7 @@ export default function InsightsPanel({
 
       {/* Keywords - Mobile Optimized */}
       {keywords.length > 0 && (
-        <Card className="border-0 shadow-sm">
+        <Card className="card-hover-lift border">
           <CardHeader className="pb-2 md:pb-3 px-3 sm:px-4">
             <CardTitle className="text-xs sm:text-sm md:text-base font-semibold">
               Top Keywords
@@ -256,7 +268,7 @@ export default function InsightsPanel({
 
       {/* AI Insights - Mobile Optimized */}
       {insights.length > 0 && aiEnabled && (
-        <Card className="border-0 shadow-sm">
+        <Card className="card-hover-lift border">
           <CardHeader className="pb-2 md:pb-3 px-3 sm:px-4">
             <CardTitle className="text-xs sm:text-sm md:text-base font-semibold flex items-center gap-2">
               <TrendingUp className="h-3 w-3 sm:h-4 sm:w-4 text-primary flex-shrink-0" />
@@ -277,7 +289,7 @@ export default function InsightsPanel({
       )}
 
       {/* Data Source Info - Mobile Optimized */}
-      <Card className="border-0 bg-muted/50">
+      <Card className="border bg-muted/50">
         <CardContent className="pt-3 md:pt-4 px-3 sm:px-4">
           <div className="text-[9px] sm:text-[10px] md:text-xs space-y-1">
             <div className="flex justify-between">

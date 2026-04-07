@@ -1,18 +1,19 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { 
-  Search, 
-  Package, 
-  TrendingUp, 
-  Globe, 
-  Filter, 
+import React, { useState } from 'react';
+import {
+  Search,
+  Package,
+  TrendingUp,
+  Globe,
+  Filter,
   Sparkles,
   ChevronRight,
-  ChevronLeft,
-  X
+  PanelLeftClose,
+  LogOut,
+  Database,
+  X,
 } from 'lucide-react';
-import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
@@ -26,12 +27,17 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { cn } from '@/lib/utils';
-import { amazonUrlParser } from '@/app/utils/amazon_url_parser';
+import { cn, extractAsin } from '@/lib/utils';
 
 interface SidebarFiltersProps {
   onAnalyze: (asin: string, maxReviews: number, enableAI: boolean, country: string) => void;
   onReset: () => void;
+  onLoadCachedResults?: () => void;
+  onLogout?: () => void;
+  onResendVerification?: () => void;
+  userEmail?: string;
+  emailVerified?: boolean;
+  cachedLoading?: boolean;
   isLoading?: boolean;
   isCollapsed?: boolean;
   onToggleCollapse?: () => void;
@@ -46,41 +52,53 @@ const EXAMPLE_ASINS = [
 ];
 
 const COUNTRIES = [
-{ code: 'US', label: 'United States' },
-{ code: 'UK', label: 'United Kingdom' },
-{ code: 'DE', label: 'Germany' },
-{ code: 'FR', label: 'France' },
-{ code: 'JP', label: 'Japan' },
-{ code: 'CA', label: 'Canada' },
-{ code: 'IN', label: 'India' }, // NEW
+  { code: 'US', label: 'United States' },
+  { code: 'UK', label: 'United Kingdom' },
+  { code: 'DE', label: 'Germany' },
+  { code: 'FR', label: 'France' },
+  { code: 'JP', label: 'Japan' },
+  { code: 'CA', label: 'Canada' },
+  { code: 'IN', label: 'India' },
 ];
+
+const REGION_FLAG: Record<string, string> = {
+  US: 'US',
+  UK: 'UK',
+  DE: 'DE',
+  FR: 'FR',
+  JP: 'JP',
+  CA: 'CA',
+  IN: 'IN',
+};
 
 export default function SidebarFilters({
   onAnalyze,
   onReset,
+  onLoadCachedResults,
+  onLogout,
+  onResendVerification,
+  userEmail,
+  emailVerified = false,
+  cachedLoading = false,
   isLoading = false,
   isCollapsed = false,
   onToggleCollapse,
-  mobileOpen = false,
   isMobile = false,
 }: SidebarFiltersProps) {
   const [asin, setAsin] = useState('');
   const [maxReviews, setMaxReviews] = useState(50);
-  const [country, setCountry] = useState('US');
+  const [country, setCountry] = useState('IN');
   const [enableAI, setEnableAI] = useState(true);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const input = asin.trim();
-
-    // Try to extract ASIN from URL or validate as ASIN
-    const extractedAsin = amazonUrlParser.extractAsin(input);
-
-    if (extractedAsin) {
-      onAnalyze(extractedAsin, maxReviews, enableAI, country);
-      // Update input field with extracted ASIN
-      setAsin(extractedAsin);
+    const extractedAsin = extractAsin(asin.trim());
+    if (!extractedAsin) {
+      return;
     }
+
+    setAsin(extractedAsin);
+    onAnalyze(extractedAsin, maxReviews, enableAI, country);
   };
 
   const handleExampleClick = (exampleAsin: string) => {
@@ -88,73 +106,68 @@ export default function SidebarFilters({
     onAnalyze(exampleAsin, maxReviews, enableAI, country);
   };
 
-  const handleMaxReviewsChange = (value: number[]) => {
-    setMaxReviews(value[0]);
-  };
-
-  // Desktop collapsed state
   if (!isMobile && isCollapsed) {
     return (
-      <aside className="h-full bg-background p-2 flex flex-col items-center gap-4 pt-6">
+      <aside className="flex h-full flex-col items-center gap-4 border-r bg-card/80 px-2 py-4 backdrop-blur">
         <Button
-          variant="ghost"
+          variant="outline"
           size="icon"
           onClick={onToggleCollapse}
-          className="hover:bg-primary/10"
+          className="h-9 w-9"
+          aria-label="Expand filters"
         >
-          <ChevronRight className="h-5 w-5" />
+          <ChevronRight className="h-4 w-4" />
         </Button>
-        <Separator className="w-full" />
-        <Search className="h-5 w-5 text-muted-foreground" />
-        <Filter className="h-5 w-5 text-muted-foreground" />
-        <Globe className="h-5 w-5 text-muted-foreground" />
+        <Separator className="w-10" />
+        <Search className="h-4 w-4 text-muted-foreground" />
+        <Filter className="h-4 w-4 text-muted-foreground" />
+        <Globe className="h-4 w-4 text-muted-foreground" />
       </aside>
     );
   }
 
   return (
-    <aside className={cn(
-      "h-full bg-background overflow-y-auto",
-      "p-4 sm:p-5 md:p-6 space-y-4 md:space-y-6"
-    )}>
-      {/* Mobile Header with Close Button */}
-      {isMobile && (
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold">Search & Filters</h2>
+    <aside
+      className={cn(
+        'flex h-full flex-col overflow-y-auto border-r bg-card/80 p-4 backdrop-blur sm:p-5',
+        isMobile && 'rounded-none border-r-0'
+      )}
+    >
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-base font-semibold text-foreground">Filters</h2>
+          <p className="text-xs text-muted-foreground">Configure your analysis scope</p>
+        </div>
+        {isMobile && onToggleCollapse && (
           <Button
             variant="ghost"
             size="icon"
             onClick={onToggleCollapse}
-            className="md:hidden"
+            className="h-9 w-9"
+            aria-label="Close filters"
           >
-            <X className="h-5 w-5" />
+            <X className="h-4 w-4" />
           </Button>
-        </div>
-      )}
-
-      {/* Desktop Collapse Button */}
-      {!isMobile && onToggleCollapse && (
-        <div className="flex items-center justify-between">
-          <h2 className="text-base font-semibold">Filters</h2>
+        )}
+        {!isMobile && onToggleCollapse && (
           <Button
             variant="ghost"
             size="icon"
             onClick={onToggleCollapse}
-            className="hover:bg-primary/10"
+            className="h-9 w-9"
+            aria-label="Collapse filters"
           >
-            <ChevronLeft className="h-4 w-4" />
+            <PanelLeftClose className="h-4 w-4" />
           </Button>
-        </div>
-      )}
+        )}
+      </div>
 
-      {/* Search Section */}
-      <div className="space-y-4">
-        <div className="flex items-center gap-2">
-          <Search className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-          <Label className="text-sm font-medium">Product Search</Label>
+      <div className="mt-5 space-y-3">
+        <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+          <Search className="h-4 w-4 text-primary" />
+          Product Search
         </div>
-        
-        {/* ASIN Input Form */}
+
         <form onSubmit={handleSubmit} className="space-y-3">
           <div className="space-y-2">
             <Input
@@ -163,73 +176,59 @@ export default function SidebarFilters({
               value={asin}
               onChange={(e) => setAsin(e.target.value)}
               disabled={isLoading}
-              className="font-mono text-xs h-10 md:h-9"
+              className="font-mono text-xs"
             />
-            <p className="text-[10px] md:text-xs text-muted-foreground">
+            <p className="text-[11px] text-muted-foreground">
               ASIN (e.g., B0CHX3TYK1) or full Amazon product URL
             </p>
           </div>
-          
-          {/* AI Toggle */}
-          <div className="flex items-center justify-between p-3 rounded-lg bg-muted/50">
-            <div className="flex items-center gap-2">
-              <Sparkles className="h-3 w-3 md:h-4 md:w-4 text-primary flex-shrink-0" />
-              <span className="text-xs md:text-sm font-medium">AI Analysis</span>
+
+          <div className="rounded-lg border bg-muted/40 p-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-4 w-4 text-primary" />
+                <span className="text-sm font-medium">AI Analysis</span>
+              </div>
+              <Switch
+                checked={enableAI}
+                onCheckedChange={setEnableAI}
+                disabled={isLoading}
+                aria-label="Toggle AI analysis"
+              />
             </div>
-            <Switch
-              checked={enableAI}
-              onCheckedChange={setEnableAI}
-              disabled={isLoading}
-              aria-label="Toggle AI analysis"
-            />
           </div>
-          
-          {/* Analyze Button */}
+
           <Button
             type="submit"
-            className="w-full h-10 md:h-9 text-sm"
+            className="w-full"
             disabled={isLoading || !asin.trim() || asin.trim().length < 10}
           >
-            {isLoading ? (
-              <>
-                <Sparkles className="h-4 w-4 mr-2 animate-spin" />
-                <span>Analyzing...</span>
-              </>
-            ) : (
-              <>
-                <Search className="h-4 w-4 mr-2" />
-                <span>Analyze Reviews</span>
-              </>
-            )}
+            {isLoading ? 'Analyzing...' : 'Analyze Reviews'}
           </Button>
         </form>
       </div>
 
       <Separator />
 
-      {/* Example ASINs */}
       <div className="space-y-3">
-        <div className="flex items-center gap-2">
-          <Package className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-          <Label className="text-sm font-medium">Quick Examples</Label>
+        <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+          <Package className="h-4 w-4 text-primary" />
+          Quick Examples
         </div>
-        <div className="grid grid-cols-1 gap-2">
+
+        <div className="space-y-2">
           {EXAMPLE_ASINS.map((example) => (
             <Button
               key={example.asin}
               variant="outline"
               size="sm"
-              className="justify-start text-left h-auto py-2.5 px-3"
+              className="h-auto w-full justify-start px-3 py-2.5 text-left"
               onClick={() => handleExampleClick(example.asin)}
               disabled={isLoading}
             >
-              <div className="flex flex-col items-start w-full gap-0.5">
-                <span className="font-mono text-[10px] md:text-xs font-semibold">
-                  {example.asin}
-                </span>
-                <span className="text-[10px] md:text-xs text-muted-foreground">
-                  {example.label}
-                </span>
+              <div className="flex min-w-0 flex-col">
+                <span className="truncate font-mono text-[11px] font-semibold">{example.asin}</span>
+                <span className="truncate text-[11px] text-muted-foreground">{example.label}</span>
               </div>
             </Button>
           ))}
@@ -238,58 +237,45 @@ export default function SidebarFilters({
 
       <Separator />
 
-      {/* Review Count Slider */}
       <div className="space-y-3">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <TrendingUp className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-            <Label className="text-sm font-medium">Max Reviews</Label>
+          <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+            <TrendingUp className="h-4 w-4 text-primary" />
+            Max Reviews
           </div>
-          <Badge variant="secondary" className="text-xs px-2 py-0.5">
-            {maxReviews}
-          </Badge>
+          <Badge variant="outline">{maxReviews}</Badge>
         </div>
+
         <Slider
           value={[maxReviews]}
-          onValueChange={handleMaxReviewsChange}
+          onValueChange={(value) => setMaxReviews(value[0])}
           min={10}
           max={100}
           step={10}
-          className="w-full"
           disabled={isLoading}
         />
-        <p className="text-[10px] md:text-xs text-muted-foreground leading-relaxed">
-          More reviews = Better insights
-        </p>
+        <p className="text-[11px] text-muted-foreground">More reviews improve trend and theme reliability.</p>
       </div>
 
       <Separator />
 
-      {/* Region Selection */}
       <div className="space-y-3">
-        <div className="flex items-center gap-2">
-          <Globe className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-          <Label className="text-sm font-medium">Region</Label>
+        <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+          <Globe className="h-4 w-4 text-primary" />
+          Region
         </div>
         <Select value={country} onValueChange={setCountry} disabled={isLoading}>
-          <SelectTrigger className="w-full h-10 md:h-9">
+          <SelectTrigger>
             <SelectValue placeholder="Select region" />
           </SelectTrigger>
           <SelectContent>
-            {COUNTRIES.map((c) => (
-              <SelectItem key={c.code} value={c.code} className="text-sm">
+            {COUNTRIES.map((item) => (
+              <SelectItem key={item.code} value={item.code}>
                 <span className="flex items-center gap-2">
-                  <span className="text-lg">
-                          {c.code === 'US' ? '🇺🇸'
-                          : c.code === 'UK' ? '🇬🇧'
-                          : c.code === 'DE' ? '🇩🇪'
-                          : c.code === 'FR' ? '🇫🇷'
-                          : c.code === 'JP' ? '🇯🇵'
-                          : c.code === 'CA' ? '🇨🇦'
-                          : c.code === 'IN' ? '🇮🇳'
-                          : '🌍'}
+                  <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full border border-border bg-muted px-1 text-[10px] font-semibold">
+                    {REGION_FLAG[item.code]}
                   </span>
-                  {c.label}
+                  {item.label}
                 </span>
               </SelectItem>
             ))}
@@ -297,16 +283,45 @@ export default function SidebarFilters({
         </Select>
       </div>
 
-      {/* Reset Button - Mobile Optimized */}
-      <div className="pt-4 border-t">
-        <Button 
-          variant="outline" 
-          className="w-full h-10 md:h-9 text-sm"
-          onClick={onReset}
-          disabled={isLoading}
-        >
+      <div className="border-t pt-4">
+        <Button variant="outline" className="w-full" onClick={onReset} disabled={isLoading}>
           Reset All
         </Button>
+      </div>
+
+      <div className="mt-auto border-t pt-4">
+        {userEmail && (
+          <p className="mb-3 truncate text-xs text-muted-foreground">
+            Signed in as <span className="font-medium text-foreground">{userEmail}</span>
+          </p>
+        )}
+        {!emailVerified && onResendVerification && (
+          <Button
+            variant="outline"
+            className="mb-2 w-full"
+            onClick={onResendVerification}
+            disabled={isLoading}
+          >
+            Verify Email
+          </Button>
+        )}
+        {onLoadCachedResults && (
+          <Button
+            variant="outline"
+            className="mb-2 w-full"
+            onClick={onLoadCachedResults}
+            disabled={cachedLoading || isLoading}
+          >
+            <Database className="mr-2 h-4 w-4" />
+            {cachedLoading ? 'Loading...' : 'Cached Results'}
+          </Button>
+        )}
+        {onLogout && (
+          <Button variant="outline" className="w-full" onClick={onLogout} disabled={isLoading}>
+            <LogOut className="mr-2 h-4 w-4" />
+            Logout
+          </Button>
+        )}
       </div>
     </aside>
   );
